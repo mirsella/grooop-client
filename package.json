@@ -1,0 +1,39 @@
+{
+  "name": "grooop-party-pwa",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "dev:worker": "wrangler dev",
+    "build": "tsc -b && vite build",
+    "deploy": "pnpm build && wrangler d1 migrations apply grooop-party-pwa --remote && wrangler deploy",
+    "lint": "oxlint",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:worker": "vitest run --config vitest.worker.config.ts",
+    "test:e2e": "playwright test",
+    "test:live": "playwright test --config playwright.live.config.ts",
+    "typecheck": "tsc -b",
+    "types:worker": "wrangler types worker-configuration.d.ts"
+  },
+  "dependencies": {
+    "jose": "^6.2.4",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.18.8",
+    "@cloudflare/workers-types": "^5.20260724.1",
+    "@playwright/test": "^1.62.0",
+    "@types/node": "^24.13.2",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.3",
+    "oxlint": "^1.71.0",
+    "typescript": "~6.0.2",
+    "vite": "^8.1.1",
+    "vitest": "^4.1.10",
+    "wrangler": "^4.114.0"
+  }
+}

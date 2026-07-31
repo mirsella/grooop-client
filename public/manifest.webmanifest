@@ -1,0 +1,13 @@
+{
+  "name": "Grooop Party",
+  "short_name": "Grooop",
+  "description": "A one-phone, two-team game night.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f3eddd",
+  "theme_color": "#e63328",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "/icon-maskable.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "maskable" }
+  ]
+}

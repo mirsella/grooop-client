@@ -1,0 +1,9 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Fraunces:opsz,wght@9..144,600;9..144,800&family=Instrument+Sans:wght@500;600;700&display=swap');
+
+:root { font-family: 'Instrument Sans', sans-serif; color: #17120f; background: #f3eddd; font-synthesis: none; text-rendering: optimizeLegibility; }
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; min-height: 100vh; }
+button, input, select { font: inherit; }
+button, select { cursor: pointer; }
+button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible { outline: 3px solid #2259d7; outline-offset: 3px; }
+button:disabled { cursor: not-allowed; opacity: .52; }

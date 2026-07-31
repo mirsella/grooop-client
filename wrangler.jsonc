@@ -1,0 +1,51 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "grooop-party-pwa",
+  "account_id": "0135d098f091b6eb12be36128efba42c",
+  "main": "worker/index.ts",
+  "compatibility_date": "2026-07-26",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "preview_urls": false,
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": true
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "grooop-party-pwa",
+      "database_id": "84d313cd-b35e-4786-855a-07a823c75903",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "MATCHES",
+        "class_name": "MatchRoom"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["MatchRoom"]
+    }
+  ],
+  "vars": {
+    "ENVIRONMENT": "production",
+    "ACCESS_TEAM_DOMAIN": "mirsella.cloudflareaccess.com",
+    "ACCESS_AUD": "14f89e15d4435b042aa1c51b194e601b51ec243621d5e72ea8c2f8c1290d73b3",
+    "OWNER_EMAIL": "mirsella@protonmail.com",
+    "ENCRYPTION_KEY_VERSION": "v1"
+  },
+  "observability": {
+    "enabled": true
+  },
+  "triggers": {
+    "crons": ["0 6 * * *"]
+  }
+}
