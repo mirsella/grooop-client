@@ -7,7 +7,7 @@ const projects: Project[] = [
 ]
 
 if (process.env.PLAYWRIGHT_WEBKIT) {
-  projects.push({ name: 'iphone-webkit', use: { ...devices['iPhone 15'] } })
+  projects.push({ name: 'iphone-webkit', use: { ...devices['iPhone 15'], serviceWorkers: 'block' } })
 }
 
 export default defineConfig({

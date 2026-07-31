@@ -1469,7 +1469,8 @@ test('reloads accounts after an unauthorized refresh and offers reauthentication
   await expect(page.getByRole('button', { name: 'Re-authenticate' })).toBeVisible()
 })
 
-test('loads its cached application offline without caching API requests', async ({ page, context }) => {
+test('loads its cached application offline without caching API requests', async ({ page, context, browserName }) => {
+  test.skip(browserName === 'webkit', 'WebKit cannot route requests controlled by a service worker')
   await page.goto('/')
   const manifest = await page.evaluate(async () => {
     const response = await fetch('/manifest.webmanifest')
