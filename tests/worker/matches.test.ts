@@ -58,6 +58,48 @@ describe('match integration', () => {
     expect(cancel).toHaveBeenCalledOnce()
   })
 
+  it('reconciles a live row when Grooop confirms that the lobby is gone', async () => {
+    const hostId = '44444444-4444-4444-8444-444444444444'
+    const guestId = '55555555-5555-4555-8555-555555555555'
+    const matchId = '66666666-6666-4666-8666-666666666666'
+    await seedAccount({ id: hostId, email: 'missing-host@example.com', sessionId: 'host', userId: 303 })
+    await seedAccount({ id: guestId, email: 'missing-guest@example.com', sessionId: 'guest', userId: 404 })
+    await env.DB.prepare(
+      `INSERT INTO matches (
+        id, status, host_account_id, guest_account_id, team_a_json, team_b_json,
+        game_mode, content_slug, duration_minutes, cost, created_at, updated_at
+      ) VALUES (?, 'revealed', ?, ?, ?, ?, 'proximo', '300', 15, 40, ?, ?)`,
+    ).bind(
+      matchId,
+      hostId,
+      guestId,
+      JSON.stringify({ name: 'Reds', roster: ['Alice'], accountId: hostId }),
+      JSON.stringify({ name: 'Blues', roster: ['Bob'], accountId: guestId }),
+      '2026-07-31T10:00:00.000Z',
+      '2026-07-31T10:00:00.000Z',
+    ).run()
+    const fetch = vi.fn(async () => Response.json({
+      error: 'party-socket-rejected',
+      message: 'Grooop rejected the party connection: lobby-not-found',
+    }, { status: 502 }))
+    const testEnv = {
+      ...env,
+      MATCHES: {
+        idFromName: vi.fn((name: string) => name),
+        get: vi.fn(() => ({ fetch })),
+      } as unknown as DurableObjectNamespace,
+    } as Env
+
+    const response = await handleMatchesApi(
+      jsonRequest(`/api/matches/${matchId}/cancel`, 'POST', {}),
+      testEnv,
+    )
+
+    expect(response?.status).toBe(200)
+    expect(await response!.json()).toMatchObject({ match: { id: matchId, status: 'cancelled' } })
+    expect(fetch).toHaveBeenCalledOnce()
+  })
+
   it('quotes and creates one waiting party for repeated idempotency keys', async () => {
     const hostId = '11111111-1111-4111-8111-111111111111'
     const guestId = '22222222-2222-4222-8222-222222222222'

@@ -616,6 +616,18 @@ async function cancelMatch(request: Request, env: Env, matchId: string): Promise
       if (typeof body.error === 'string') error = body.error
       if (typeof body.message === 'string') message = body.message
     } catch { /* The room returned a non-JSON failure. */ }
+    const lobbyMissing = error === 'party-lobby-not-found' ||
+      (error === 'party-socket-rejected' && message.endsWith(': lobby-not-found'))
+    if (lobbyMissing) {
+      const now = new Date().toISOString()
+      await env.DB.prepare(
+        `UPDATE matches SET status = 'cancelled', finished_at = ?, updated_at = ?
+         WHERE id = ? AND status IN ('waiting', 'playing', 'revealed')`,
+      ).bind(now, now, match.id).run()
+      const updated = await matchById(env, match.id)
+      if (updated.status === 'cancelled') return json({ match: publicMatch(updated) })
+      throw new HttpError(409, 'match-not-cancellable', 'This match cannot be cancelled')
+    }
     throw new HttpError(cancelled.status, error, message)
   }
   const updated = await matchById(env, match.id)
