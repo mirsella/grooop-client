@@ -223,7 +223,11 @@ export class PartySocket {
   private connectionError(event?: CloseEvent): HttpError {
     if (this.connectionRejection) {
       console.warn('Grooop rejected a party socket connection', { reason: this.connectionRejection })
-      return new HttpError(502, 'party-socket-rejected', 'Grooop rejected the party connection')
+      return new HttpError(
+        502,
+        'party-socket-rejected',
+        `Grooop rejected the party connection: ${this.connectionRejection}`,
+      )
     }
     const detail = event ? ` (close code ${event.code})` : ''
     return new HttpError(502, 'party-socket-connect-failed', `Grooop party connection failed${detail}`)
