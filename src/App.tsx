@@ -1053,7 +1053,7 @@ function App() {
   async function updateAccount(id: string, operation: "refresh" | "remove") {
     if (
       operation === "remove" &&
-      !window.confirm("Remove this account from Grooop Party?")
+      !window.confirm("Remove this account from Grooop Client?")
     )
       return;
     setAccountError("");
@@ -1571,7 +1571,7 @@ function App() {
         <a
           className="brand"
           href="#top"
-          aria-label="Grooop Party home"
+          aria-label="Grooop Client home"
           onClick={() => navigate("play")}
         >
           <span className="brand-mark" aria-hidden="true">

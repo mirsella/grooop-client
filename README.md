@@ -1,4 +1,4 @@
-# Grooop Party PWA
+# Grooop Client
 
 Private, one-phone client for two Grooop accounts. It supports Proximo and
 TTMC: the browser manages two local teams while a Cloudflare Worker keeps each

@@ -1476,7 +1476,7 @@ test('loads its cached application offline without caching API requests', async 
     const response = await fetch('/manifest.webmanifest')
     return response.json() as Promise<{ name: string; start_url: string; display: string; icons: Array<{ purpose: string }> }>
   })
-  expect(manifest).toMatchObject({ name: 'Grooop Party', start_url: '/', display: 'standalone' })
+  expect(manifest).toMatchObject({ name: 'Grooop Client', start_url: '/', display: 'standalone' })
   expect(manifest.icons.some((icon) => icon.purpose === 'maskable')).toBe(true)
 
   await page.evaluate(async () => {

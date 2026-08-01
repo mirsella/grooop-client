@@ -10,7 +10,7 @@ if (!baseURL || !storageState) {
 }
 const liveUrl = new URL(baseURL)
 if (liveUrl.origin !== 'https://grooop-party-pwa.mirsella.workers.dev') {
-  throw new Error('LIVE_BASE_URL must be the production Grooop Party HTTPS origin')
+  throw new Error('LIVE_BASE_URL must be the production Grooop Client HTTPS origin')
 }
 const statePath = resolve(storageState)
 const repository = resolve(import.meta.dirname)
