@@ -222,11 +222,12 @@ export class PartySocket {
 
   private connectionError(event?: CloseEvent): HttpError {
     if (this.connectionRejection) {
-      console.warn('Grooop rejected a party socket connection', { reason: this.connectionRejection })
+      const reason = this.connectionRejection
+      console.warn('Grooop rejected a party socket connection', { reason })
       return new HttpError(
-        502,
-        'party-socket-rejected',
-        `Grooop rejected the party connection: ${this.connectionRejection}`,
+        reason === 'lobby-not-found' ? 410 : 502,
+        reason === 'lobby-not-found' ? 'party-lobby-not-found' : 'party-socket-rejected',
+        `Grooop rejected the party connection: ${reason}`,
       )
     }
     const detail = event ? ` (close code ${event.code})` : ''
@@ -1128,8 +1129,34 @@ export class MatchRoom implements DurableObject {
     this.scheduleReconnect()
   }
 
+  private async finalizeCancellation(): Promise<boolean> {
+    const { host, guest } = this
+    if (!host || !guest) throw new HttpError(409, 'match-not-cancellable', 'This match cannot be cancelled')
+    const snapshot = this.snapshot()
+    snapshot.status = 'cancelled'
+    snapshot.connected = false
+    const projected = await this.complete(snapshot)
+    host.disconnect()
+    guest.disconnect()
+    this.broadcast({ type: 'state', match: snapshot })
+    this.cancelling = false
+    return projected
+  }
+
   private async cancel(): Promise<void> {
-    await this.ensureConnected()
+    try {
+      await this.ensureConnected()
+    } catch (error) {
+      if (
+        !(error instanceof HttpError) || error.code !== 'party-lobby-not-found' ||
+        !this.match || !LIVE_STATUSES.has(this.match.status)
+      ) throw error
+      this.cancelling = true
+      if (!await this.finalizeCancellation()) {
+        throw new HttpError(503, 'match-cancel-finalizing', 'Match cancellation is still being saved')
+      }
+      return
+    }
     if (this.terminalSnapshot?.status === 'cancelled') {
       if (!await this.projectTerminal()) {
         throw new HttpError(503, 'match-cancel-finalizing', 'Match cancellation is still being saved')
@@ -1174,20 +1201,13 @@ export class MatchRoom implements DurableObject {
       throw new HttpError(409, 'match-cancel-outcome-unknown', 'The cancellation is awaiting reconciliation')
     }
 
-    const snapshot = this.snapshot()
-    snapshot.status = 'cancelled'
-    snapshot.connected = false
     let projected: boolean
     try {
-      projected = await this.complete(snapshot)
+      projected = await this.finalizeCancellation()
     } catch {
       this.resumeLiveState()
       throw new HttpError(409, 'match-cancel-outcome-unknown', 'The cancellation is awaiting reconciliation')
     }
-    host.disconnect()
-    guest.disconnect()
-    this.broadcast({ type: 'state', match: snapshot })
-    this.cancelling = false
     if (!projected) {
       throw new HttpError(503, 'match-cancel-finalizing', 'Match cancellation is still being saved')
     }

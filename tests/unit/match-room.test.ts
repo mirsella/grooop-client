@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { Env } from '../../worker/env'
+import { HttpError } from '../../worker/http'
 import { MatchRoom, PartySocket } from '../../worker/match-room'
 import { SharedState, type JsonObject } from '../../worker/shared-state'
 
@@ -621,6 +622,31 @@ describe('MatchRoom command ordering', () => {
     await expect(room.runCancellation()).resolves.toBeUndefined()
     expect(host.request).toHaveBeenCalledWith(0, 'start-round', undefined)
     expect(guest.request).toHaveBeenCalledWith(0, 'give-up', undefined)
+  })
+
+  it('releases a match only when Grooop confirms that its lobby no longer exists', async () => {
+    const missing = createHarness(null)
+    missing.host.connect.mockRejectedValue(new HttpError(
+      410,
+      'party-lobby-not-found',
+      'Grooop rejected the party connection: lobby-not-found',
+    ))
+
+    await expect(missing.room.runCancellation()).resolves.toBeUndefined()
+    expect(missing.guest.request).not.toHaveBeenCalled()
+    expect(missing.room.match.status).toBe('cancelled')
+    expect(missing.storage.get('terminalSnapshot')).toMatchObject({ status: 'cancelled', connected: false })
+
+    const rejected = createHarness(null)
+    rejected.host.connect.mockRejectedValue(new HttpError(
+      502,
+      'party-socket-rejected',
+      'Grooop rejected the party connection: unauthorized',
+    ))
+
+    await expect(rejected.room.runCancellation()).rejects.toMatchObject({ code: 'party-socket-rejected' })
+    expect(rejected.room.match.status).toBe('playing')
+    expect(rejected.databaseRuns).not.toHaveBeenCalled()
   })
 
   it('keeps an unresolved cancellation live and resumes state reconciliation', async () => {

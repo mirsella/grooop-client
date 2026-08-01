@@ -160,8 +160,8 @@ describe('PartySocket', () => {
     transport.message('@CE lobby-not-found')
 
     await expect(connecting).rejects.toMatchObject({
-      status: 502,
-      code: 'party-socket-rejected',
+      status: 410,
+      code: 'party-lobby-not-found',
       message: 'Grooop rejected the party connection: lobby-not-found',
     })
     expect(warning).toHaveBeenCalledWith(
