@@ -1,4 +1,4 @@
-const CACHE = 'grooop-static-v5'
+const CACHE = 'grooop-static-v6-svelte'
 const STATIC = ['/', '/manifest.webmanifest', '/icon.svg', '/icon-maskable.svg']
 
 self.addEventListener('install', (event) => event.waitUntil(

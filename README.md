@@ -5,7 +5,7 @@
   <p>A private game-night desk for running Proximo and TTMC with two Grooop accounts.</p>
   <p>
     <a href="https://github.com/mirsella/grooop-client/actions/workflows/ci.yml"><img src="https://github.com/mirsella/grooop-client/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
-    <img src="https://img.shields.io/badge/React-19-2a5bd7?logo=react&logoColor=white" alt="React 19">
+    <img src="https://img.shields.io/badge/Svelte-5-ff3e00?logo=svelte&logoColor=white" alt="Svelte 5">
     <img src="https://img.shields.io/badge/Cloudflare-Workers-f48120?logo=cloudflare&logoColor=white" alt="Cloudflare Workers">
     <img src="https://img.shields.io/badge/PWA-installable-ef3127" alt="Installable PWA">
   </p>
@@ -44,7 +44,7 @@ Grooop Client turns one phone into a control desk for two local teams. It keeps 
   </tr>
 </table>
 
-The visual language is intentionally loud: newsprint, primary colors, hard borders, oversized type. It should feel like something on the table during game night, not an admin dashboard.
+The visual language is an editorial scorecard: oversized type, compact controls, sharp color, and just enough motion to make state changes obvious. It belongs on the table during game night, not in an admin dashboard.
 
 ## Why the Worker exists
 
@@ -60,7 +60,7 @@ flowchart LR
     D1 -->|encrypted sessions| Room
 ```
 
-- React 19 and Vite serve an installable responsive PWA.
+- Svelte 5 and Vite serve an installable responsive PWA.
 - Cloudflare Access protects every static and API request. The Worker verifies the JWT again.
 - D1 stores encrypted account material, match records, presets, challenges, and observed questions.
 - One Durable Object per match owns synchronization, deadlines, mutation markers, reconnects, and the terminal snapshot.
@@ -187,7 +187,7 @@ Same-origin checks protect mutations and browser WebSocket upgrades. The outer W
 ## Project map
 
 ```text
-src/                 React PWA and API client
+src/                 Svelte PWA and API client
 worker/              Worker routes, Grooop boundary, and MatchRoom
 migrations/          Ordered D1 schema migrations
 tests/unit/          Protocol, crypto, reducer, and Durable Object tests
