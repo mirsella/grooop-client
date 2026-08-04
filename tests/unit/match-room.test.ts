@@ -31,6 +31,7 @@ interface RoomInternals {
   publishing: Promise<void>
   snapshot: () => Record<string, unknown>
   questionTiming: { identity: string; deadlineAt: number } | null
+  proximoReadyAt: number | null
   observedQuestionIdentity: string | null
   acceptQuestionTransitions: boolean
   cancelling: boolean
@@ -378,8 +379,10 @@ describe('MatchRoom command ordering', () => {
   })
 
   it('finishes local state without repeating an already-finished upstream command', async () => {
-    const { room, host, databaseRuns } = createHarness(7)
-    host.shared.apply({ a: 0, t: '@SO', d: { a: 'M', k: 'party', n: 'state', v: 'finished' } })
+    const { room, host, guest, databaseRuns } = createHarness(null)
+    for (const party of [host, guest]) {
+      party.shared.apply({ a: 0, t: '@SO', d: { a: 'M', k: 'party', n: 'state', v: 'finished' } })
+    }
 
     await expect(room.handleCommand({ type: 'finish' })).resolves.toBe('already-finished')
     expect(host.request).not.toHaveBeenCalled()
@@ -574,7 +577,9 @@ describe('MatchRoom command ordering', () => {
   it('only finishes after authoritative party completion', async () => {
     const accepted = createHarness(null)
     accepted.host.request.mockImplementation(async () => {
-      accepted.host.shared.apply({ a: 0, t: '@SO', d: { a: 'M', k: 'party', n: 'state', v: 'finished' } })
+      for (const party of [accepted.host, accepted.guest]) {
+        party.shared.apply({ a: 0, t: '@SO', d: { a: 'M', k: 'party', n: 'state', v: 'finished' } })
+      }
       return 'no-running-game'
     })
 
@@ -603,6 +608,17 @@ describe('MatchRoom command ordering', () => {
     expect(storage.has('cancelAction')).toBe(false)
     expect(storage.get('terminalSnapshot')).toMatchObject({ id: 'match-id', status: 'cancelled', connected: false })
     expect(databaseRuns).toHaveBeenCalledOnce()
+  })
+
+  it('classifies an already synchronized finished party as natural completion, not cancellation', async () => {
+    const { room, host, guest, storage } = createHarness(null)
+    for (const party of [host, guest]) {
+      party.shared.apply({ a: 0, t: '@SO', d: { a: 'M', k: 'party', n: 'state', v: 'finished' } })
+    }
+
+    await expect(room.runCancellation()).resolves.toBeUndefined()
+    expect(guest.request).not.toHaveBeenCalled()
+    expect(storage.get('terminalSnapshot')).toMatchObject({ status: 'finished', connected: false })
   })
 
   it('starts an empty waiting TTMC party before cancelling it', async () => {
@@ -806,9 +822,18 @@ describe('MatchRoom command ordering', () => {
     await expect(finish).rejects.toMatchObject({ code: 'finish-outcome-unknown' })
   })
 
-  it('stores the terminal snapshot before projecting authoritative party completion to D1', async () => {
+  it('waits for complete Proximo terminal frames before storing the terminal snapshot', async () => {
     const completed = createHarness(7)
     completed.host.shared.apply({ a: 0, t: '@SO', d: { a: 'M', k: 'party', n: 'state', v: 'finished' } })
+    await completed.room.publishState()
+    expect(completed.storage.has('terminalSnapshot')).toBe(false)
+
+    completed.guest.shared.apply({ a: 0, t: '@SO', d: { a: 'M', k: 'party', n: 'state', v: 'finished' } })
+    completed.host.shared.apply({ a: 0, t: '@SL', d: { a: 'P', k: 'games', n: 0, p: 'state', v: 'finished' } })
+    completed.host.shared.apply({ a: 0, t: '@SL', d: { a: 'P', k: 'games', n: 0, p: 'showAnswer', v: true } })
+    completed.host.shared.apply({ a: 0, t: '@SL', d: { a: 'P', k: 'games', n: 0, p: 'answer', v: 6 } })
+    completed.host.shared.apply({ a: 7, t: '@SL', d: { a: 'P', k: 'scores', n: 0, p: 'answer', v: 4 } })
+    completed.host.shared.apply({ a: 7, t: '@SL', d: { a: 'P', k: 'scores', n: 1, p: 'answer', v: 8 } })
     await completed.room.publishState()
     expect(completed.room.match.status).toBe('finished')
     expect(completed.databasePrepare).toHaveBeenCalledWith(expect.stringContaining('finished_at'))
@@ -821,10 +846,38 @@ describe('MatchRoom command ordering', () => {
     expect(completed.storage.get('terminalSnapshot')).toMatchObject({ status: 'finished', connected: false })
   })
 
-  it('retries terminal D1 projection from an alarm after a failure and restart', async () => {
+  it('does not let a stale live publication overwrite a terminal D1 state', async () => {
     const harness = createHarness(7)
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    harness.host.shared.apply({ a: 0, t: '@SL', d: { a: 'P', k: 'games', n: 0, p: 'showAnswer', v: true } })
+    harness.databaseRuns.mockResolvedValueOnce({ success: true, meta: { changes: 0 } })
+
+    await harness.room.publishState()
+
+    expect(harness.room.match.status).toBe('playing')
+    expect(warning).toHaveBeenCalledWith('Live state publish was fenced by a terminal D1 state')
+    warning.mockRestore()
+  })
+
+  it('uses the persisted ready start as a conservative deadline after synchronization', async () => {
+    const { room, host, storage } = createHarness(7)
+    const readyAt = Date.now() - 2_000
+    room.proximoReadyAt = readyAt
+    room.acceptQuestionTransitions = false
+    host.shared.apply({ a: 0, t: '@SL', d: { a: 'P', k: 'games', n: 0, p: 'question', v: 'Recovered?' } })
+    host.shared.apply({ a: 0, t: '@SL', d: { a: 'P', k: 'games', n: 0, p: 'questionDurationSeconds', v: 30 } })
+
+    await room.publishState()
+
+    expect(storage.get('questionTiming')).toEqual({ identity: '7:4:Recovered?', deadlineAt: readyAt + 30_000 })
+  })
+
+  it('retries terminal D1 projection from an alarm after a failure and restart', async () => {
+    const harness = createHarness(null)
     harness.storage.set('matchId', 'match-id')
-    harness.host.shared.apply({ a: 0, t: '@SO', d: { a: 'M', k: 'party', n: 'state', v: 'finished' } })
+    for (const party of [harness.host, harness.guest]) {
+      party.shared.apply({ a: 0, t: '@SO', d: { a: 'M', k: 'party', n: 'state', v: 'finished' } })
+    }
     harness.databaseRuns.mockRejectedValueOnce(new Error('database unavailable'))
 
     await harness.room.publishState()
@@ -838,6 +891,31 @@ describe('MatchRoom command ordering', () => {
 
     expect(harness.databaseRuns).toHaveBeenCalledTimes(2)
     expect(restarted.match?.status).toBe('finished')
+  })
+
+  it('waits for all TTMC terminal round frames before freezing a natural finish', async () => {
+    const { room, host, guest, storage } = createHarness(null)
+    room.match.game_mode = 'ttmc'
+    activateTtmcRound(room, host, guest, { id: 12, gameName: 'ttmc-round', state: 'finished', played: [101, 202], total: 2 })
+    room.match.rounds = 2
+    for (const party of [host, guest]) party.shared.apply({ a: 0, t: '@SO', d: { a: 'M', k: 'party', n: 'state', v: 'finished' } })
+
+    await room.publishState()
+    expect(storage.has('terminalSnapshot')).toBe(false)
+
+    for (const party of [host, guest]) party.shared.apply({
+      a: 0, t: '@SL', d: { a: 'A', k: 'rounds', v: { id: 13, gameName: 'ttmc-round', state: 'finished', played: [101, 202], total: 2 } },
+    })
+    for (const party of [host, guest]) {
+      for (const roundId of [12, 13]) party.shared.apply({
+        a: roundId, t: '@SL', d: { a: 'C', k: 'scores', v: [
+          { id: 101, difficulty: 1, success: true, points: 1 },
+          { id: 202, difficulty: 1, success: false, points: 0 },
+        ] },
+      })
+    }
+    await room.publishState()
+    expect(storage.get('terminalSnapshot')).toMatchObject({ status: 'finished', connected: false })
   })
 
   it('serves a persisted terminal snapshot after a room restart', async () => {
@@ -952,6 +1030,10 @@ describe('MatchRoom command ordering', () => {
     })
 
     await room.handleCommand({ type: 'start-ttmc-question', roundId: 12, side: 'a', difficulty: 9 })
+    await room.handleCommand({ type: 'ttmc-answers', roundId: 12, answers: { a: true } })
+    for (const party of [host, guest]) party.shared.apply({
+      a: 0, t: '@SL', d: { a: 'P', k: 'rounds', n: 0, p: 'played', v: [101] },
+    })
     await room.handleCommand({ type: 'start-ttmc-question', roundId: 12, side: 'b', difficulty: 0 })
     expect(host.request).toHaveBeenCalledWith(12, 'start', 9)
     expect(guest.request).toHaveBeenCalledWith(12, 'start', 0)
@@ -960,7 +1042,7 @@ describe('MatchRoom command ordering', () => {
     expect(active.teams.b).toMatchObject({ difficulty: 1, success: null, points: null, officialAnswer: null })
     expect(JSON.stringify(active)).not.toContain('correct')
 
-    await room.handleCommand({ type: 'ttmc-answers', roundId: 12, answers: { a: true, b: [0] } })
+    await room.handleCommand({ type: 'ttmc-answers', roundId: 12, answers: { b: [0] } })
     expect(host.request).toHaveBeenCalledWith(12, 'answer', true)
     expect(guest.request).toHaveBeenCalledWith(12, 'answer', [0])
     host.shared.apply({ a: 12, t: '@SL', d: { a: 'P', k: 'scores', n: 0, p: 'success', v: true } })
@@ -985,9 +1067,9 @@ describe('MatchRoom command ordering', () => {
       public: { type: 'number', prompt: 'How many?', min: 0, max: 100, step: 0.1 },
     })
     number.host.request.mockResolvedValue({ success: true })
-    await expect(number.room.handleCommand({ type: 'ttmc-answers', roundId: 12, answers: { a: 42.5 } })).resolves.toEqual(['accepted'])
     await expect(number.room.handleCommand({ type: 'ttmc-answers', roundId: 12, answers: { a: 42.55 } }))
       .rejects.toMatchObject({ code: 'invalid-answers' })
+    await expect(number.room.handleCommand({ type: 'ttmc-answers', roundId: 12, answers: { a: 42.5 } })).resolves.toEqual(['accepted'])
     expect(number.host.request).toHaveBeenCalledWith(12, 'answer', 42.5)
 
     const decimalNumber = createHarness(null)
@@ -1009,9 +1091,9 @@ describe('MatchRoom command ordering', () => {
       public: { type: 'oneword', prompt: 'Name it' },
     })
     oneword.host.request.mockResolvedValue({ success: true })
-    await expect(oneword.room.handleCommand({ type: 'ttmc-answers', roundId: 12, answers: { a: '  PARIS  ' } })).resolves.toEqual(['accepted'])
     await expect(oneword.room.handleCommand({ type: 'ttmc-answers', roundId: 12, answers: { a: '   ' } }))
       .rejects.toMatchObject({ code: 'invalid-answers' })
+    await expect(oneword.room.handleCommand({ type: 'ttmc-answers', roundId: 12, answers: { a: '  PARIS  ' } })).resolves.toEqual(['accepted'])
     expect(oneword.host.request).toHaveBeenCalledWith(12, 'answer', 'paris')
 
     const words = createHarness(null)
@@ -1022,9 +1104,9 @@ describe('MatchRoom command ordering', () => {
       public: { type: 'words', prompt: 'Complete it', candidates: ['blue', 'sky', 'green'], answerWordCount: 2 },
     })
     words.host.request.mockResolvedValue({ success: true })
-    await expect(words.room.handleCommand({ type: 'ttmc-answers', roundId: 12, answers: { a: ['sky', 'blue'] } })).resolves.toEqual(['accepted'])
     await expect(words.room.handleCommand({ type: 'ttmc-answers', roundId: 12, answers: { a: ['blue'] } }))
       .rejects.toMatchObject({ code: 'invalid-answers' })
+    await expect(words.room.handleCommand({ type: 'ttmc-answers', roundId: 12, answers: { a: ['sky', 'blue'] } })).resolves.toEqual(['accepted'])
     expect(words.host.request).toHaveBeenCalledWith(12, 'answer', ['sky', 'blue'])
   })
 
@@ -1182,7 +1264,7 @@ describe('MatchRoom command ordering', () => {
       })
     }
     await expect(malformed.room.handleCommand({ type: 'ttmc-answers', roundId: 12, answers: { a: true, b: 'invalid' } }))
-      .rejects.toMatchObject({ code: 'invalid-answers' })
+      .rejects.toMatchObject({ code: 'ttmc-one-answer-per-turn' })
     expect(malformed.host.request).not.toHaveBeenCalled()
     expect(malformed.guest.request).not.toHaveBeenCalled()
 
@@ -1200,14 +1282,13 @@ describe('MatchRoom command ordering', () => {
     concurrent.host.request.mockRejectedValue(new Error('host response lost'))
     concurrent.guest.request.mockReturnValue(guestResult.promise)
     let settled = false
-    const command = concurrent.room.handleCommand({ type: 'ttmc-answers', roundId: 12, answers: { a: true, b: false } })
+    const command = concurrent.room.handleCommand({ type: 'ttmc-answers', roundId: 12, answers: { a: true } })
       .finally(() => { settled = true })
     await Promise.resolve()
     await Promise.resolve()
     expect(settled).toBe(false)
-    guestResult.resolve({ success: true })
     await expect(command).rejects.toMatchObject({ code: 'answer-outcome-unknown' })
-    expect(concurrent.guest.request).toHaveBeenCalledWith(12, 'answer', false)
+    expect(concurrent.guest.request).not.toHaveBeenCalled()
   })
 
   it('rejects TTMC advances with another running round and TTMC commands in Proximo mode', async () => {
@@ -1226,5 +1307,22 @@ describe('MatchRoom command ordering', () => {
     const proximo = createHarness(7)
     await expect(proximo.room.handleCommand({ type: 'next-ttmc-round', roundId: 7 }))
       .rejects.toMatchObject({ code: 'unsupported-action' })
+  })
+
+  it('enforces alternating TTMC turns and does not expose a pending answer as submitted', async () => {
+    const { room, host, guest, storage } = createHarness(null)
+    activateTtmcRound(room, host, guest)
+    await expect(room.handleCommand({ type: 'start-ttmc-question', roundId: 12, side: 'b', difficulty: 1 }))
+      .rejects.toMatchObject({ code: 'ttmc-wrong-turn' })
+    addTtmcScore(host, guest, 101, 1)
+    storage.set('ttmc:question:12:101', {
+      raw: { question: 'A?', answers: { selected: 'bool', answer: true } }, public: { type: 'bool', prompt: 'A?' },
+    })
+    storage.set('ttmc:answer:12:101', { status: 'pending', value: true })
+    expect(((room.snapshot().game as { teams: { a: { submitted: boolean } } }).teams.a.submitted)).toBe(false)
+    await expect(room.handleCommand({ type: 'ttmc-answers', roundId: 12, answers: { a: true, b: false } }))
+      .rejects.toMatchObject({ code: 'ttmc-one-answer-per-turn' })
+    await expect(room.handleCommand({ type: 'ttmc-answers', roundId: 12, answers: { b: false } }))
+      .rejects.toMatchObject({ code: 'ttmc-wrong-turn' })
   })
 })

@@ -1,6 +1,8 @@
 import { env } from 'cloudflare:test'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { handleAccountsApi } from '../../worker/accounts'
+import { accountSecrets, handleAccountsApi, withAccountSession } from '../../worker/accounts'
+import { encrypt } from '../../worker/crypto'
+import { HttpError } from '../../worker/http'
 import { jsonRequest, seedAccount } from './helpers'
 
 afterEach(() => {
@@ -184,6 +186,22 @@ describe('account integration', () => {
     expect(fetchMock).toHaveBeenCalledTimes(3)
   })
 
+  it('does not let an unauthorized stale session invalidate a reauthenticated session', async () => {
+    const accountId = '11111111-1111-4111-8111-111111111111'
+    await seedAccount({ id: accountId, email: 'owner@example.com', sessionId: 'old-session', userId: 701 })
+    const { account } = await accountSecrets(env, accountId)
+    let reject!: (error: Error) => void
+    const stale = withAccountSession(env, accountId, account, () => new Promise<never>((_, fail) => { reject = fail }))
+    const fresh = await encrypt('new-session', env)
+    await env.DB.prepare(`UPDATE accounts SET session_ciphertext = ?, session_nonce = ?, session_key_version = ?,
+      status = 'active' WHERE id = ?`)
+      .bind(fresh.ciphertext, fresh.nonce, fresh.keyVersion, accountId).run()
+    reject(new HttpError(401, 'grooop-unauthorized', 'unauthorized'))
+    await expect(stale).rejects.toMatchObject({ code: 'grooop-unauthorized' })
+    expect(await env.DB.prepare('SELECT status FROM accounts WHERE id = ?').bind(accountId).first())
+      .toEqual({ status: 'active' })
+  })
+
   it('atomically limits concurrent magic-code verification attempts', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const path = new URL(String(input)).pathname
@@ -219,7 +237,7 @@ describe('account integration', () => {
     ))).toHaveLength(5)
   })
 
-  it.each(['finished', 'error'] as const)(
+  it.each(['finished', 'cancelled', 'error'] as const)(
     'rejects removal when the account has %s match history',
     async (status) => {
       const hostId = '11111111-1111-4111-8111-111111111111'

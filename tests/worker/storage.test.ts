@@ -98,6 +98,10 @@ describe('D1 schema', () => {
     await insert('33333333-3333-4333-8333-333333333333', 'finished')
     await insert('44444444-4444-4444-8444-444444444444', 'error', 'party-create-rejected')
     await insert('88888888-8888-4888-8888-888888888888', 'cancelled')
+    await insert('99999999-9999-4999-8999-999999999999', 'error', 'party-identity-mismatch')
+    await expect(insert('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'creating')).rejects.toThrow()
+    await env.DB.prepare('DELETE FROM matches WHERE id = ?')
+      .bind('99999999-9999-4999-8999-999999999999').run()
     await insert('55555555-5555-4555-8555-555555555555', 'creating')
     await expect(insert('66666666-6666-4666-8666-666666666666', 'joining')).rejects.toThrow()
     await expect(insert(
@@ -111,6 +115,7 @@ describe('D1 schema', () => {
     ).first<{ sql: string }>()
     expect(index?.sql).toContain('UNIQUE INDEX')
     expect(index?.sql).toContain("status IN ('creating', 'joining', 'waiting', 'playing', 'revealed')")
+    expect(index?.sql).toContain("'party-identity-mismatch'")
   })
 
   it('enforces mode-specific TTMC content JSON', async () => {

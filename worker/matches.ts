@@ -74,7 +74,7 @@ interface PartyCreateResponse {
 
 const BLOCKING_MATCH_PREDICATE = `
   status IN ('creating', 'joining', 'waiting', 'playing', 'revealed')
-  OR (status = 'error' AND error_code = 'party-create-outcome-unknown')`
+  OR (status = 'error' AND error_code IN ('party-create-outcome-unknown', 'party-identity-mismatch'))`
 
 function stringField(value: unknown, name: string, maxLength = 80): string {
   if (typeof value !== 'string' || !value.trim() || value.trim().length > maxLength) {
@@ -225,7 +225,7 @@ async function prepareMatch(env: Env, input: MatchInput): Promise<PreparedMatch>
   const hostId = input.hostAccountId
   const guestId = hostId === input.teamAAccountId ? input.teamBAccountId : input.teamAAccountId
   const [host, guest] = await Promise.all([accountSecrets(env, hostId), accountSecrets(env, guestId)])
-  const parameters = await withAccountSession(env, hostId, () => grooopRequest<unknown>('party/parameters', {
+  const parameters = await withAccountSession(env, hostId, host.account, () => grooopRequest<unknown>('party/parameters', {
     method: 'GET', sessionId: host.sessionId,
   }))
   const parameterValues = parameters && typeof parameters === 'object' && !Array.isArray(parameters)
@@ -252,9 +252,9 @@ async function prepareMatch(env: Env, input: MatchInput): Promise<PreparedMatch>
     }
   }
   const [hostUser, guestUser, quote] = await Promise.all([
-    withAccountSession(env, hostId, () => retrieveUser(host.sessionId)),
-    withAccountSession(env, guestId, () => retrieveUser(guest.sessionId)),
-    withAccountSession(env, hostId, () => grooopRequest<{ cost?: unknown; userCanSpend?: unknown }>('party/compute-cost', {
+    withAccountSession(env, hostId, host.account, () => retrieveUser(host.sessionId)),
+    withAccountSession(env, guestId, guest.account, () => retrieveUser(guest.sessionId)),
+    withAccountSession(env, hostId, host.account, () => grooopRequest<{ cost?: unknown; userCanSpend?: unknown }>('party/compute-cost', {
       method: 'POST',
       sessionId: host.sessionId,
       body: {
@@ -331,7 +331,7 @@ async function resumeJoiningMatch(env: Env, match: MatchRow): Promise<MatchRow> 
   }
 
   try {
-    const [{ sessionId }, partyCode] = await Promise.all([
+    const [{ account, sessionId }, partyCode] = await Promise.all([
       accountSecrets(env, match.guest_account_id),
       decrypt({
         ciphertext: match.party_code_ciphertext,
@@ -339,13 +339,17 @@ async function resumeJoiningMatch(env: Env, match: MatchRow): Promise<MatchRow> 
         keyVersion: match.party_code_key_version,
       }, env),
     ])
-    const queried = await withAccountSession(env, match.guest_account_id, () => grooopRequest<unknown>(`party/${partyCode}/query`, {
+    const queried = await withAccountSession(env, match.guest_account_id, account, () => grooopRequest<unknown>(`party/${partyCode}/query`, {
       method: 'GET',
       sessionId,
     }))
     const queryStatus = extractStatus(queried)
     if (queryStatus && queryStatus !== 'success') {
-      throw new HttpError(502, queryStatus, 'The guest could not query the party')
+      throw new HttpError(
+        502,
+        queryStatus === 'lobby-not-found' ? 'party-lobby-not-found' : queryStatus,
+        'The guest could not query the party',
+      )
     }
     const queriedParty = queried && typeof queried === 'object' && !Array.isArray(queried)
       ? (queried as Record<string, unknown>).party
@@ -358,18 +362,28 @@ async function resumeJoiningMatch(env: Env, match: MatchRow): Promise<MatchRow> 
       console.error('Guest party query returned a different party')
       throw new HttpError(409, 'party-identity-mismatch', 'The party identity changed')
     }
-    const joined = await withAccountSession(env, match.guest_account_id, () => grooopRequest<{ status?: string }>(`party/${partyCode}/join`, {
+    const joined = await withAccountSession(env, match.guest_account_id, account, () => grooopRequest<{ status?: string }>(`party/${partyCode}/join`, {
       method: 'POST',
       sessionId,
     }))
     const joinStatus = extractStatus(joined)
     if (joinStatus !== 'success' && joinStatus !== 'user-already-joined') {
-      throw new HttpError(502, 'party-join-failed', 'The guest could not join the party')
+      throw new HttpError(
+        502,
+        joinStatus === 'lobby-not-found' ? 'party-lobby-not-found' : 'party-join-failed',
+        'The guest could not join the party',
+      )
     }
   } catch (error) {
     const code = error instanceof HttpError ? error.code : 'party-join-failed'
-    await env.DB.prepare('UPDATE matches SET error_code = ?, updated_at = ? WHERE id = ?')
-      .bind(code, new Date().toISOString(), match.id)
+    const definitive = code === 'party-lobby-not-found' || code === 'party-identity-mismatch'
+    const now = new Date().toISOString()
+    await env.DB.prepare(definitive
+      ? `UPDATE matches SET status = ?, error_code = ?, finished_at = ?, updated_at = ? WHERE id = ?`
+      : 'UPDATE matches SET error_code = ?, updated_at = ? WHERE id = ?')
+      .bind(...(definitive
+        ? [code === 'party-lobby-not-found' ? 'cancelled' : 'error', code, now, now, match.id]
+        : [code, now, match.id]))
       .run()
     throw error
   }
@@ -408,7 +422,7 @@ async function responseForExistingMatch(
     throw new HttpError(409, 'match-creation-failed', 'This match creation attempt failed')
   }
   if (match.status === 'waiting') await initializeMatchRoom(env, match.id)
-  if (!['waiting', 'playing', 'revealed', 'finished'].includes(match.status)) {
+  if (!['waiting', 'playing', 'revealed', 'finished', 'cancelled'].includes(match.status)) {
     console.error('Idempotent match has an unexpected persisted status', match.status)
     throw new HttpError(409, 'match-creation-unresolved', 'Match creation is unresolved')
   }
@@ -491,7 +505,7 @@ async function createMatch(request: Request, env: Env): Promise<Response> {
 
   let created: PartyCreateResponse
   try {
-    created = await withAccountSession(env, hostId, () => grooopRequest('party/create', {
+    created = await withAccountSession(env, hostId, host.account, () => grooopRequest('party/create', {
       method: 'POST',
       sessionId: host.sessionId,
       body: input.gameMode === 'proximo'
@@ -607,6 +621,21 @@ async function cancelMatch(request: Request, env: Env, matchId: string): Promise
   }
 
   const room = env.MATCHES.get(env.MATCHES.idFromName(match.id))
+  const initialized = await room.fetch('https://match.internal/internal/initialize', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ matchId: match.id, recoverGameplay: false }),
+  })
+  if (!initialized.ok) {
+    let error = 'match-room-initialize-failed'
+    let message = 'The match room could not initialize cancellation'
+    try {
+      const body = await initialized.json() as { error?: unknown, message?: unknown }
+      if (typeof body.error === 'string') error = body.error
+      if (typeof body.message === 'string') message = body.message
+    } catch { /* The room returned a non-JSON failure. */ }
+    throw new HttpError(initialized.status, error, message)
+  }
   const cancelled = await room.fetch('https://match.internal/internal/cancel', { method: 'POST' })
   if (!cancelled.ok) {
     let error = 'match-cancel-failed'
@@ -616,18 +645,6 @@ async function cancelMatch(request: Request, env: Env, matchId: string): Promise
       if (typeof body.error === 'string') error = body.error
       if (typeof body.message === 'string') message = body.message
     } catch { /* The room returned a non-JSON failure. */ }
-    const lobbyMissing = error === 'party-lobby-not-found' ||
-      (error === 'party-socket-rejected' && message.endsWith(': lobby-not-found'))
-    if (lobbyMissing) {
-      const now = new Date().toISOString()
-      await env.DB.prepare(
-        `UPDATE matches SET status = 'cancelled', finished_at = ?, updated_at = ?
-         WHERE id = ? AND status IN ('waiting', 'playing', 'revealed')`,
-      ).bind(now, now, match.id).run()
-      const updated = await matchById(env, match.id)
-      if (updated.status === 'cancelled') return json({ match: publicMatch(updated) })
-      throw new HttpError(409, 'match-not-cancellable', 'This match cannot be cancelled')
-    }
     throw new HttpError(cancelled.status, error, message)
   }
   const updated = await matchById(env, match.id)

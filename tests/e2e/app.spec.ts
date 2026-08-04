@@ -71,6 +71,7 @@ type MockApiState = {
   unexpectedRequests: string[]
   allowedBrowserErrors: RegExp[]
   refreshUnauthorized: boolean
+  refreshInactive: boolean
   matchGetDelays: number[]
   matchFailuresRemaining: number
   questionFailure: boolean
@@ -110,6 +111,7 @@ async function mockApi(page: Page): Promise<MockApiState> {
     unexpectedRequests: [],
     allowedBrowserErrors: [],
     refreshUnauthorized: false,
+    refreshInactive: false,
     matchGetDelays: [],
     matchFailuresRemaining: 0,
     questionFailure: false,
@@ -238,6 +240,9 @@ async function mockApi(page: Page): Promise<MockApiState> {
         return fulfill(route, { error: 'grooop-unauthorized', message: 'Grooop rejected this session' }, 401)
       }
       const account = state.accounts.find((item) => item.id === refresh[1])
+      if (account && state.refreshInactive) {
+        Object.assign(account, { status: 'reauth-required' })
+      }
       return account ? fulfill(route, { account }) : fulfill(route, { error: 'account-not-found' }, 404)
     }
     if (url.pathname === '/api/cache-probe' && method === 'GET') {
@@ -506,6 +511,10 @@ async function mockLiveSocket(page: Page) {
       },
       __e2eSetUpstreamConnected: (connected: boolean) => {
         live.connected = connected
+        sockets.forEach((socket) => socket.emit({ type: 'state', match: live }))
+      },
+      __e2eSetTerminal: (status: 'finished' | 'failed' | 'cancelled') => {
+        live.status = status
         sockets.forEach((socket) => socket.emit({ type: 'state', match: live }))
       },
       __e2eMalformedIdentity: () => sockets.forEach((socket) => socket.emitMalformedIdentity()),
@@ -1036,6 +1045,24 @@ test('keeps a surviving account attached to its team when another account disapp
   await expect(page.getByLabel('Host')).toHaveValue('b')
 })
 
+test('reconciles team assignments when an account refresh becomes inactive', async ({ page }) => {
+  const api = apiState(page)
+  api.accounts.push({ id: 'account-c', email: 'third@example.com', userId: 34871, grooopies: 1200, status: 'active' })
+  await page.goto('/')
+  await page.getByLabel('Team A account').selectOption('account-c')
+  await page.getByLabel('Team B account').selectOption('account-b')
+  await page.getByLabel('Host').selectOption('a')
+
+  api.refreshInactive = true
+  await tabButton(page, 'settings').click()
+  await page.locator('.account-list li').filter({ hasText: 'third@example.com' }).getByRole('button', { name: 'Refresh' }).click()
+  await tabButton(page, 'play').click()
+
+  await expect(page.getByLabel('Team A account')).toHaveValue('account-a')
+  await expect(page.getByLabel('Team B account')).toHaveValue('account-b')
+  await expect(page.getByLabel('Host')).toHaveValue('b')
+})
+
 test('restores the newest active match after a page reload', async ({ page }) => {
   apiState(page).matches = [structuredClone(match)]
   await page.goto('/')
@@ -1335,6 +1362,38 @@ test('groups every active match and can cancel a previous one', async ({ page })
   await expect(page.getByRole('heading', { name: 'Past matches' })).toBeVisible()
   await expect(page.getByText('Earlier A')).toBeVisible()
   await expect(page.getByRole('button', { name: 'Cancel match' })).toHaveCount(1)
+})
+
+test('automatically prices the unchanged setup after cancelling a match', async ({ page }) => {
+  const api = apiState(page)
+  await createMatchFromQuote(page)
+  const quotesBeforeCancel = api.quoteRequests.length
+  await tabButton(page, 'history').click()
+
+  page.once('dialog', (dialog) => dialog.accept())
+  await page.getByRole('button', { name: 'Cancel match' }).click()
+  await expect.poll(() => api.quoteRequests.length).toBeGreaterThan(quotesBeforeCancel)
+  await tabButton(page, 'play').click()
+  await expect(page.getByRole('button', { name: /Create match — 100 grooopies/ })).toBeEnabled()
+})
+
+test('reconciles a terminal socket state before pricing a new match', async ({ page }) => {
+  const api = apiState(page)
+  await createMatchFromQuote(page)
+  const quotesBeforeTerminalState = api.quoteRequests.length
+  await page.evaluate(() => {
+    (globalThis as typeof globalThis & {
+      __e2eSetTerminal: (status: 'finished' | 'failed' | 'cancelled') => void
+    }).__e2eSetTerminal('finished')
+  })
+
+  await expect(page.getByText('This match is closed. Its result remains in History.')).toBeVisible()
+  await tabButton(page, 'history').click()
+  await expect(page.getByRole('heading', { name: 'Past matches' })).toBeVisible()
+  await expect.poll(() => api.quoteRequests.length).toBeGreaterThan(quotesBeforeTerminalState)
+  await tabButton(page, 'play').click()
+  await page.getByRole('button', { name: /Create match — 100 grooopies/ }).click()
+  expect(api.createBodies).toHaveLength(2)
 })
 
 test('disables setup fields while match creation is in flight', async ({ page }) => {

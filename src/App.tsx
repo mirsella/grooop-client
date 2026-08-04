@@ -437,6 +437,7 @@ function useQuestionCountdown(deadlineAt: number | null) {
 function useLiveMatch(
   matchId: string | null,
   onActionError: (command: MatchCommand) => void,
+  onAuthoritativeState: (match: LiveMatch) => void,
 ) {
   const [match, setMatch] = useState<LiveMatch | null>(null);
   const [state, setState] = useState<SocketState>("idle");
@@ -487,6 +488,7 @@ function useLiveMatch(
         const nextMatch = message.match;
         validState();
         setMatch(nextMatch);
+        onAuthoritativeState(nextMatch);
         setError("");
         return;
       }
@@ -709,6 +711,7 @@ function App() {
   const matchLoadVersion = useRef(0);
   const questionLoadVersion = useRef(0);
   const historyLoadVersion = useRef(0);
+  const terminalMatchStates = useRef(new Map<string, string>());
   const initialRestoreAllowed = useRef(true);
 
   const [accounts, setAccounts] = useState<Account[] | null>(null);
@@ -745,18 +748,42 @@ function App() {
   const [ttmcDifficulties, setTtmcDifficulties] = useState<
     Record<Side, number>
   >({ a: 1, b: 1 });
-  const live = useLiveMatch(currentMatchId, (command) => {
-    if (command.type !== "answers") return;
-    setAnswers((current) => ({
-      ...current,
-      ...Object.fromEntries(
-        Object.entries(command.answers).map(([side, answer]) => [
-          side,
-          String(answer),
-        ]),
-      ),
-    }));
-  });
+  const live = useLiveMatch(
+    currentMatchId,
+    (command) => {
+      if (command.type !== "answers") return;
+      setAnswers((current) => ({
+        ...current,
+        ...Object.fromEntries(
+          Object.entries(command.answers).map(([side, answer]) => [
+            side,
+            String(answer),
+          ]),
+        ),
+      }));
+    },
+    (authoritativeMatch) => {
+      if (![
+        "finished",
+        "failed",
+        "cancelled",
+      ].includes(authoritativeMatch.status.toLowerCase())) return;
+      if (terminalMatchStates.current.has(authoritativeMatch.id)) return;
+      terminalMatchStates.current.set(
+        authoritativeMatch.id,
+        authoritativeMatch.status,
+      );
+      matchLoadVersion.current += 1;
+      setMatches((current) =>
+        current.map((item) =>
+          item.id === authoritativeMatch.id
+            ? { ...item, status: authoritativeMatch.status }
+            : item,
+        ),
+      );
+      refreshQuote();
+    },
+  );
 
   function navigate(next: Tab) {
     initialRestoreAllowed.current = false;
@@ -814,6 +841,28 @@ function App() {
     }
   }, [draft]);
 
+  function reconcileAccountAssignments(loaded: Account[]) {
+    const active = loaded.filter(isActive);
+    editDraft((current) => {
+      const valid = (id: string) => active.some((account) => account.id === id);
+      let a = valid(current.accountIds.a) ? current.accountIds.a : "";
+      let b = valid(current.accountIds.b) ? current.accountIds.b : "";
+      if (a === b) b = "";
+      if (!a) a = active.find((account) => account.id !== b)?.id ?? "";
+      if (!b) b = active.find((account) => account.id !== a)?.id ?? "";
+      const accountIds = { a, b };
+      const assignmentsUnchanged =
+        a === current.accountIds.a && b === current.accountIds.b;
+      return {
+        ...current,
+        accountIds,
+        host: assignmentsUnchanged
+          ? current.host
+          : lowestBalanceSide(accountIds, active, current.host),
+      };
+    });
+  }
+
   async function loadAccounts() {
     const version = ++accountLoadVersion.current;
     setLoadingAccounts(true);
@@ -821,26 +870,8 @@ function App() {
     try {
       const { accounts: loaded } = await getAccounts();
       if (accountLoadVersion.current !== version) return;
-      const active = loaded.filter(isActive);
       setAccounts(loaded);
-      editDraft((current) => {
-        const valid = (id: string) => active.some((account) => account.id === id);
-        let a = valid(current.accountIds.a) ? current.accountIds.a : "";
-        let b = valid(current.accountIds.b) ? current.accountIds.b : "";
-        if (a === b) b = "";
-        if (!a) a = active.find((account) => account.id !== b)?.id ?? "";
-        if (!b) b = active.find((account) => account.id !== a)?.id ?? "";
-        const accountIds = { a, b };
-        const assignmentsUnchanged =
-          a === current.accountIds.a && b === current.accountIds.b;
-        return {
-          ...current,
-          accountIds,
-          host: assignmentsUnchanged
-            ? current.host
-            : lowestBalanceSide(accountIds, active, current.host),
-        };
-      });
+      reconcileAccountAssignments(loaded);
     } catch (error) {
       if (accountLoadVersion.current === version)
         setAccountError(
@@ -861,6 +892,13 @@ function App() {
       if (presetLoadVersion.current === version)
         setPresetError(errorMessage(error, "Could not load team presets."));
     }
+  }
+
+  function reconcileTerminalMatchStates(loaded: Match[]) {
+    return loaded.map((item) => {
+      const terminalStatus = terminalMatchStates.current.get(item.id);
+      return terminalStatus ? { ...item, status: terminalStatus } : item;
+    });
   }
 
   useEffect(() => {
@@ -934,8 +972,9 @@ function App() {
     try {
       const result = await getMatches();
       if (matchLoadVersion.current !== version) return;
-      setMatches(result.matches);
-      let active = result.matches.find(isResumableMatch);
+      const reconciledMatches = reconcileTerminalMatchStates(result.matches);
+      setMatches(reconciledMatches);
+      let active = reconciledMatches.find(isResumableMatch);
       if (active?.status.toLowerCase() === "joining") {
         const resumed = await resumeMatch(active.id);
         if (matchLoadVersion.current !== version) return;
@@ -979,7 +1018,7 @@ function App() {
       matchResult.status === "fulfilled" &&
       matchLoadVersion.current === matchesVersion
     )
-      setMatches(matchResult.value.matches);
+      setMatches(reconcileTerminalMatchStates(matchResult.value.matches));
     else if (matchResult.status === "rejected")
       errors.push(
         errorMessage(matchResult.reason, "Could not load match history."),
@@ -1146,11 +1185,15 @@ function App() {
       if (operation === "refresh") {
         accountLoadVersion.current += 1;
         const { account } = await refreshAccount(id);
-        setAccounts(
-          (current) =>
-            current?.map((item) => (item.id === id ? account : item)) ?? null,
+        if (accounts === null) {
+          console.warn("Received an account refresh while the account list is unavailable.");
+          return;
+        }
+        const updated = accounts.map((item) =>
+          item.id === id ? account : item,
         );
-        invalidateQuote();
+        setAccounts(updated);
+        reconcileAccountAssignments(updated);
         if (id === ttmcHostAccountId) setTtmcCatalogRefresh((current) => current + 1);
       } else {
         await deleteAccount(id);
@@ -1484,10 +1527,11 @@ function App() {
     setCancellingMatchId(match.id);
     try {
       const { match: cancelled } = await cancelMatch(match.id);
+      terminalMatchStates.current.set(cancelled.id, cancelled.status);
       matchLoadVersion.current += 1;
       setMatches((current) => current.map((item) => item.id === cancelled.id ? cancelled : item));
       setCurrentMatchId((current) => current === cancelled.id ? null : current);
-      invalidateQuote();
+      refreshQuote();
     } catch (error) {
       setHistoryError(errorMessage(error, "Could not cancel this match."));
     } finally {
@@ -1531,21 +1575,29 @@ function App() {
   const gameReady =
     (proximoGame?.scores.length ?? 0) >= 2 &&
     proximoGame?.scores.every((score) => score.isReady) === true;
-  const [autoReadyGameId, setAutoReadyGameId] = useState<number | null>(null);
-  const autoReadyGameIdRef = useRef<number | null>(null);
+  const [autoReadyKey, setAutoReadyKey] = useState<string | null>(null);
+  const autoReadyKeyRef = useRef<string | null>(null);
   const automaticallyReady = useEffectEvent((gameId: number) => {
     live.send({ type: "ready", gameId });
   });
   useEffect(() => {
+    autoReadyKeyRef.current = null;
+    setAutoReadyKey(null);
+  }, [currentMatchId]);
+  const proximoReadyKey =
+    currentMatchId && proximoGame && isGameId(proximoGame.id)
+      ? `${currentMatchId}:${proximoGame.id}`
+      : null;
+  useEffect(() => {
     if (
       !proximoGame || !isGameId(proximoGame.id) || gameReady || gameRevealed ||
       proximoGame.currentRound !== -1 || !gameplayEnabled || live.inFlightAction !== null ||
-      autoReadyGameIdRef.current === proximoGame.id
+      !proximoReadyKey || autoReadyKeyRef.current === proximoReadyKey
     ) return;
-    autoReadyGameIdRef.current = proximoGame.id;
-    setAutoReadyGameId(proximoGame.id);
+    autoReadyKeyRef.current = proximoReadyKey;
+    setAutoReadyKey(proximoReadyKey);
     automaticallyReady(proximoGame.id);
-  }, [proximoGame, gameReady, gameRevealed, gameplayEnabled, live.inFlightAction]);
+  }, [proximoGame, gameReady, gameRevealed, gameplayEnabled, live.inFlightAction, proximoReadyKey]);
   const questionActive =
     proximoGame?.showAnswer === false &&
     typeof proximoGame.question === "string" &&
@@ -2210,6 +2262,13 @@ function App() {
                 </small>
               </div>
             )}
+            <p className="sr-only" role="status" aria-live="polite">
+              {playBusy === "quote"
+                ? "Pricing this match automatically."
+                : quote
+                  ? "Automatic pricing is complete."
+                  : "Automatic pricing waits for a complete match setup."}
+            </p>
             <div className="quote-actions">
               <button
                 className="create-button"
@@ -2278,7 +2337,7 @@ function App() {
           ) : (
             <>
               <div className="live-strip" aria-live="polite">
-                <span className={`socket-dot ${live.state}`}></span>
+                <span className={`socket-dot ${live.state}`} aria-hidden="true"></span>
                 <b>{live.state === "open" ? "Live connection" : live.state}</b>
                 <span>Match {currentMatchId}</span>
                 {currentMatch && (
@@ -2589,8 +2648,12 @@ function App() {
                                            <b>Team {reader.toUpperCase()}, read this aloud.</b>
                                            Team {side.toUpperCase()} gives the final answer.
                                          </p>
-                                         <b>{question.prompt}</b>
-                                          {question.type === "bool" && (
+                                          <b>{question.prompt}</b>
+                                          <fieldset className="ttmc-answer-controls">
+                                            <legend className="sr-only">
+                                              Team {side.toUpperCase()} answer controls
+                                            </legend>
+                                           {question.type === "bool" && (
                                             <div className="choice-row">
                                               <button
                                                 type="button"
@@ -2728,7 +2791,7 @@ function App() {
                                               }
                                             />
                                           )}
-                                          {question.type === "words" && (
+                                           {question.type === "words" && (
                                             <>
                                               <p className="answer-instruction">
                                                 Build a{" "}
@@ -2830,9 +2893,10 @@ function App() {
                                                   Clear
                                                 </button>
                                               </p>
-                                            </>
-                                          )}
-                                        </div>
+                                             </>
+                                           )}
+                                          </fieldset>
+                                         </div>
                                       )}
                                       {team.submitted && !finished && (
                                         <p className="submitted-note">
@@ -3012,7 +3076,7 @@ function App() {
                             <p className="control-note" role="status">
                               Opening the question…
                             </p>
-                          ) : autoReadyGameId === proximoGame.id ? (
+                          ) : autoReadyKey === proximoReadyKey ? (
                             <button
                               disabled={!gameplayEnabled || live.inFlightAction !== null}
                               type="button"

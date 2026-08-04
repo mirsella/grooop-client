@@ -35,6 +35,7 @@ const MAX_RECONNECT_ATTEMPTS = 5
 const MAX_RECONNECT_DELAY_MS = 10_000
 const PROXIMO_ADD_REQUESTED_KEY = 'proximoAddRequested'
 const QUESTION_TIMING_KEY = 'questionTiming'
+const PROXIMO_READY_AT_KEY = 'proximoReadyAt'
 const FINISH_ACTION_KEY = 'finishAction'
 const CANCEL_ACTION_KEY = 'cancelAction'
 const TERMINAL_SNAPSHOT_KEY = 'terminalSnapshot'
@@ -333,6 +334,7 @@ export class MatchRoom implements DurableObject {
   private reconnecting: Promise<void> | null = null
   private reconnectAttempts = 0
   private questionTiming: QuestionTiming | null = null
+  private proximoReadyAt: number | null = null
   private observedQuestionIdentity: string | null = null
   private acceptQuestionTransitions = false
   private readonly ttmcQuestions = new Map<string, StoredTtmcQuestion>()
@@ -341,6 +343,7 @@ export class MatchRoom implements DurableObject {
   private ttmcRecovering: Promise<void> | null = null
   private terminalSnapshot: Record<string, unknown> | null = null
   private cancelling = false
+  private finishRequested = false
 
   constructor(
     private readonly state: DurableObjectState,
@@ -350,9 +353,15 @@ export class MatchRoom implements DurableObject {
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url)
     if (url.pathname === '/internal/initialize' && request.method === 'POST') {
-      const { matchId } = await readJson(request) as { matchId?: unknown }
+      const { matchId, recoverGameplay } = await readJson(request) as {
+        matchId?: unknown
+        recoverGameplay?: unknown
+      }
       if (typeof matchId !== 'string' || !/^[a-f0-9-]{36}$/.test(matchId)) {
         throw new HttpError(400, 'invalid-match-id', 'Match ID is invalid')
+      }
+      if (recoverGameplay !== undefined && typeof recoverGameplay !== 'boolean') {
+        throw new HttpError(400, 'invalid-recovery-policy', 'Recovery policy is invalid')
       }
       const storedId = await this.state.storage.get<string>('matchId')
       if (storedId && storedId !== matchId) {
@@ -361,7 +370,7 @@ export class MatchRoom implements DurableObject {
       }
       await this.state.storage.put('matchId', matchId)
       try {
-        await this.ensureConnected()
+        await this.ensureConnected(recoverGameplay !== false)
         return json({ status: 'connected' })
       } catch (error) {
         if (error instanceof HttpError) {
@@ -508,6 +517,8 @@ export class MatchRoom implements DurableObject {
     }
     this.expectedPlayerIds = expectedPlayerIds
     this.questionTiming = await this.state.storage.get<QuestionTiming>(QUESTION_TIMING_KEY) ?? null
+    this.proximoReadyAt = await this.state.storage.get<number>(PROXIMO_READY_AT_KEY) ?? null
+    this.finishRequested = await this.state.storage.get<StoredMutationAction>(FINISH_ACTION_KEY) !== undefined
     this.observedQuestionIdentity = this.questionTiming?.identity ?? null
     if (match.game_mode === 'ttmc') {
       const stored = await this.state.storage.list<StoredTtmcQuestion>({ prefix: 'ttmc:question:' })
@@ -517,7 +528,9 @@ export class MatchRoom implements DurableObject {
         if (typeof action.difficulty === 'number') this.ttmcDifficulties.set(key.slice('ttmc:start:'.length), action.difficulty + 1)
       }
       const answers = await this.state.storage.list<StoredTtmcAnswer>({ prefix: 'ttmc:answer:' })
-      for (const key of answers.keys()) this.ttmcSubmitted.add(key.slice('ttmc:answer:'.length))
+      for (const [key, action] of answers) {
+        if (action.status === 'accepted') this.ttmcSubmitted.add(key.slice('ttmc:answer:'.length))
+      }
     }
     const changed = () => {
       if (!this.cancelling) {
@@ -640,6 +653,14 @@ export class MatchRoom implements DurableObject {
   private ttmcScore(socket: PartySocket, roundId: number, playerId: number): JsonObject | null {
     return socket.shared.list(roundId, 'scores').map(asObject)
       .find((score): score is JsonObject => score !== null && Number(score.id) === playerId) ?? null
+  }
+
+  private ttmcExpectedSide(round: JsonObject, index: number): 'a' | 'b' {
+    const [first, second] = index % 2 === 0 ? ['a', 'b'] as const : ['b', 'a'] as const
+    const firstPlayer = this.ttmcTeam(first).playerId
+    const submitted = Array.isArray(round.played) && round.played.some((id) => Number(id) === firstPlayer) ||
+      this.ttmcSubmitted.has(this.ttmcQuestionKey(Number(round.id), firstPlayer))
+    return submitted ? second : first
   }
 
   private gameState(gameId: number): JsonObject {
@@ -849,6 +870,7 @@ export class MatchRoom implements DurableObject {
     await Promise.all([
       this.state.storage.delete(PROXIMO_ADD_REQUESTED_KEY),
       this.state.storage.delete(QUESTION_TIMING_KEY),
+      this.state.storage.delete(PROXIMO_READY_AT_KEY),
     ])
   }
 
@@ -1064,6 +1086,8 @@ export class MatchRoom implements DurableObject {
         this.questionTiming = null
         await this.state.storage.delete(QUESTION_TIMING_KEY)
       }
+      this.proximoReadyAt = null
+      await this.state.storage.delete(PROXIMO_READY_AT_KEY)
       return
     }
     if (!active || gameId === null) return
@@ -1074,8 +1098,15 @@ export class MatchRoom implements DurableObject {
     }
     if (this.observedQuestionIdentity === identity) return
     if (!this.acceptQuestionTransitions) {
+      const deadlineAt = this.proximoReadyAt === null ? null : this.proximoReadyAt + Number(duration) * 1_000
       console.warn('Refusing to create a deadline for a question first discovered during synchronization')
       this.observedQuestionIdentity = identity
+      if (deadlineAt !== null && deadlineAt > Date.now()) {
+        const timing = { identity, deadlineAt }
+        await this.state.storage.put(QUESTION_TIMING_KEY, timing)
+        this.questionTiming = timing
+        return
+      }
       if (this.questionTiming) {
         this.questionTiming = null
         await this.state.storage.delete(QUESTION_TIMING_KEY)
@@ -1098,11 +1129,22 @@ export class MatchRoom implements DurableObject {
     try {
       if (match.status !== status) {
         const now = new Date().toISOString()
-        await this.env.DB.prepare('UPDATE matches SET status = ?, finished_at = ?, updated_at = ? WHERE id = ?')
-          .bind(status, now, now, match.id).run()
+        const result = await this.env.DB.prepare(
+          "UPDATE matches SET status = ?, finished_at = ?, updated_at = ? WHERE id = ? AND status IN ('waiting', 'playing', 'revealed')",
+        ).bind(status, now, now, match.id).run()
+        const changed = (result as { meta?: { changes?: number } }).meta?.changes
+        if (changed === 0) {
+          const current = await this.env.DB.prepare('SELECT * FROM matches WHERE id = ?').bind(match.id).first<MatchRow>()
+          if (!current || current.status !== status) {
+            console.error('Terminal projection was fenced by a conflicting D1 state')
+            await this.state.storage.setAlarm(Date.now() + TERMINAL_PROJECTION_RETRY_DELAY_MS)
+            return false
+          }
+        }
         match.status = status
       }
       if (status === 'cancelled') await this.state.storage.delete(CANCEL_ACTION_KEY)
+      if (status === 'finished') await this.state.storage.delete(FINISH_ACTION_KEY)
       return true
     } catch (error) {
       console.error('Failed to project terminal snapshot to D1', error)
@@ -1167,16 +1209,13 @@ export class MatchRoom implements DurableObject {
     if (!match || !host || !guest || !LIVE_STATUSES.has(match.status)) {
       throw new HttpError(409, 'match-not-cancellable', 'This match cannot be cancelled')
     }
+    if (asObject(host.shared.get(0, 'party'))?.state === 'finished') {
+      await this.publishState()
+      if (this.terminalSnapshot?.status === 'finished') return
+      throw new HttpError(409, 'match-finish-synchronizing', 'The match is finishing; wait for its results')
+    }
     const stored = await this.state.storage.get<StoredMutationAction>(CANCEL_ACTION_KEY)
     if (stored) {
-      const party = asObject(host.shared.get(0, 'party'))
-      if (party?.state === 'finished') {
-        this.cancelling = true
-        if (!await this.finalizeCancellation()) {
-          throw new HttpError(503, 'match-cancel-finalizing', 'Match cancellation is still being saved')
-        }
-        return
-      }
       throw new HttpError(409, 'match-cancel-outcome-unknown', 'A previous cancellation is awaiting reconciliation')
     }
 
@@ -1230,7 +1269,7 @@ export class MatchRoom implements DurableObject {
     await this.syncQuestionTiming()
     const snapshot = this.snapshot()
     const party = asObject(snapshot.party)
-    if (party?.state === 'finished' && this.match.status !== 'finished') {
+    if (party?.state === 'finished' && this.match.status !== 'finished' && this.terminalFramesComplete(snapshot)) {
       snapshot.status = 'finished'
       snapshot.connected = false
       await this.complete(snapshot)
@@ -1245,9 +1284,18 @@ export class MatchRoom implements DurableObject {
         ? 'playing'
         : this.ttmcRounds().some((round) => round.state === 'finished') ? 'revealed' : 'waiting'
       : game?.showAnswer === true ? 'revealed' : game ? 'playing' : 'waiting'
+    if (this.terminalSnapshot) {
+      this.broadcast({ type: 'state', match: this.terminalSnapshot })
+      return
+    }
     if (status !== this.match.status) {
-      await this.env.DB.prepare('UPDATE matches SET status = ?, updated_at = ? WHERE id = ?')
-        .bind(status, new Date().toISOString(), this.match.id).run()
+      const result = await this.env.DB.prepare(
+        "UPDATE matches SET status = ?, updated_at = ? WHERE id = ? AND status IN ('waiting', 'playing', 'revealed')",
+      ).bind(status, new Date().toISOString(), this.match.id).run()
+      if ((result as { meta?: { changes?: number } }).meta?.changes === 0) {
+        console.warn('Live state publish was fenced by a terminal D1 state')
+        return
+      }
       this.match.status = status
       snapshot.status = status
     }
@@ -1272,6 +1320,35 @@ export class MatchRoom implements DurableObject {
       }
     }
     this.broadcast({ type: 'state', match: snapshot })
+  }
+
+  private terminalFramesComplete(snapshot: Record<string, unknown>): boolean {
+    if (!this.host || !this.guest) return false
+    if (
+      asObject(this.host.shared.get(0, 'party'))?.state !== 'finished' ||
+      asObject(this.guest.shared.get(0, 'party'))?.state !== 'finished'
+    ) return false
+    if (!this.isTtmc()) {
+      if (this.finishRequested) return true
+      const game = asObject(snapshot.game)
+      if (!game) return true
+      if (game.state !== 'finished' || game.showAnswer !== true || game.answer == null) return false
+      const scores = Array.isArray(game.scores)
+        ? game.scores.map(asObject).filter((score): score is JsonObject => score !== null)
+        : []
+      return this.expectedPlayerIds.every((id) =>
+        scores.some((score) => score.id === id && score.submitted === true))
+    }
+    const expectedRounds = this.match?.rounds
+    const rounds = this.ttmcRounds()
+    return typeof expectedRounds === 'number' && rounds.length >= expectedRounds && rounds.every((round) => {
+      const played = round.played
+      if (round.state !== 'finished' || !Array.isArray(played)) return false
+      return this.expectedPlayerIds.every((playerId, index) => {
+        const score = this.ttmcScore(index === 0 ? this.host! : this.guest!, Number(round.id), playerId)
+        return played.some((id) => Number(id) === playerId) && typeof score?.success === 'boolean'
+      })
+    })
   }
 
   private officialTtmcAnswer(raw: JsonObject | undefined): unknown {
@@ -1450,13 +1527,14 @@ export class MatchRoom implements DurableObject {
       const roundId = Number(parsed[1])
       const playerId = Number(parsed[2])
       const key = this.ttmcQuestionKey(roundId, playerId)
-      this.ttmcSubmitted.add(key)
+      if (action.status === 'accepted') this.ttmcSubmitted.add(key)
       if (action.status !== 'pending') continue
       const round = this.ttmcRound(roundId)
       const played = Array.isArray(round?.played) && round.played.some((id) => Number(id) === playerId)
       const score = this.scoreForPlayer(roundId, playerId)
       if (played && typeof score?.success === 'boolean') {
         await this.state.storage.put(storageKey, { status: 'accepted', value: action.value } satisfies StoredTtmcAnswer)
+        this.ttmcSubmitted.add(key)
       }
     }
   }
@@ -1543,6 +1621,9 @@ export class MatchRoom implements DurableObject {
         throw new HttpError(400, 'invalid-difficulty', 'Difficulty must be an integer from 0 to 9')
       }
       if (finished || round.state !== 'running') throw new HttpError(409, 'round-not-running', 'TTMC round is not running')
+      if (command.side !== this.ttmcExpectedSide(round, current.index)) {
+        throw new HttpError(409, 'ttmc-wrong-turn', 'It is not this team\'s TTMC turn')
+      }
       const selected = this.ttmcTeam(command.side)
       const key = this.ttmcActionKey('start', roundId, selected.playerId)
       const stored = await this.state.storage.get<StoredTtmcStart>(key)
@@ -1592,6 +1673,13 @@ export class MatchRoom implements DurableObject {
       const values = asObject(command.answers)
       const sides = (['a', 'b'] as const).filter((side) => values && Object.hasOwn(values, side))
       if (!sides.length) throw new HttpError(400, 'invalid-answers', 'At least one answer is required')
+      if (sides.length !== 1) throw new HttpError(409, 'ttmc-one-answer-per-turn', 'Submit only the active TTMC team answer')
+      const replayPlayerId = this.ttmcTeam(sides[0]).playerId
+      const replayed = Array.isArray(round.played) && round.played.some((id) => Number(id) === replayPlayerId) &&
+        await this.state.storage.get<StoredTtmcAnswer>(this.ttmcActionKey('answer', roundId, replayPlayerId))
+      if (sides[0] !== this.ttmcExpectedSide(round, current.index) && !replayed) {
+        throw new HttpError(409, 'ttmc-wrong-turn', 'It is not this team\'s TTMC turn')
+      }
       const prepared = await Promise.all(sides.map(async (side) => {
         const selected = this.ttmcTeam(side)
         const score = this.ttmcScore(selected.socket, roundId, selected.playerId)
@@ -1615,7 +1703,6 @@ export class MatchRoom implements DurableObject {
         return { selected, value, key, questionKey, alreadySubmitted: stored !== undefined }
       }))
       const submissions = prepared.map(async ({ selected, value, key, questionKey, alreadySubmitted }) => {
-        this.ttmcSubmitted.add(questionKey)
         if (alreadySubmitted) return 'already-submitted'
         await this.state.storage.put(key, { status: 'pending', value } satisfies StoredTtmcAnswer)
         let result: unknown
@@ -1630,6 +1717,7 @@ export class MatchRoom implements DurableObject {
           throw new HttpError(409, 'answer-outcome-unknown', 'The answer is awaiting reconciliation')
         }
         await this.state.storage.put(key, { status: 'accepted', value } satisfies StoredTtmcAnswer)
+        this.ttmcSubmitted.add(questionKey)
         return 'accepted'
       })
       const settled = await Promise.allSettled(submissions)
@@ -1656,7 +1744,7 @@ export class MatchRoom implements DurableObject {
     const party = asObject(host.shared.get(0, 'party'))
 
     if (party?.state === 'finished' || match.status === 'finished') {
-      if (party?.state === 'finished') {
+      if (party?.state === 'finished' && this.finishRequested) {
         await this.state.storage.put(FINISH_ACTION_KEY, { status: 'accepted' } satisfies StoredMutationAction)
       }
       await this.publishState()
@@ -1678,6 +1766,7 @@ export class MatchRoom implements DurableObject {
       if (await this.state.storage.get<StoredMutationAction>(FINISH_ACTION_KEY)) {
         throw new HttpError(409, 'finish-outcome-unknown', 'A previous finish action is awaiting reconciliation')
       }
+      this.finishRequested = true
       await this.state.storage.put(FINISH_ACTION_KEY, { status: 'pending' } satisfies StoredMutationAction)
       let result: unknown
       try {
@@ -1688,16 +1777,15 @@ export class MatchRoom implements DurableObject {
       if (result !== 'success' && result !== 'ok' && result !== 'no-running-game') {
         if (typeof result === 'string') {
           await this.state.storage.delete(FINISH_ACTION_KEY)
+          this.finishRequested = false
           throw new HttpError(502, 'finish-rejected', 'The game could not be finished')
         }
         console.warn('Proximo finish returned an ambiguous response')
         throw new HttpError(409, 'finish-outcome-unknown', 'The party finish is awaiting reconciliation')
       }
       try {
-        await host.waitForState((shared) => {
-          const synchronizedParty = asObject(shared.get(0, 'party'))
-          return synchronizedParty?.state === 'finished' ? true : undefined
-        })
+        await Promise.all([host, guest].map((socket) => socket.waitForState((shared) =>
+          asObject(shared.get(0, 'party'))?.state === 'finished' ? true : undefined)))
       } catch {
         throw new HttpError(409, 'finish-outcome-unknown', 'The party finish is awaiting reconciliation')
       }
@@ -1744,6 +1832,8 @@ export class MatchRoom implements DurableObject {
         console.warn('Ready command received before synchronized player scores were available')
         throw new HttpError(409, 'game-scores-not-synchronized', 'Game scores are not synchronized')
       }
+      this.proximoReadyAt = Date.now()
+      await this.state.storage.put(PROXIMO_READY_AT_KEY, this.proximoReadyAt)
       const settled = await Promise.allSettled([
         this.markReady(host, gameId, hostPlayerId, hostScore.isReady === true),
         this.markReady(guest, gameId, guestPlayerId, guestScore.isReady === true),

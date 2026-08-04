@@ -80,8 +80,8 @@ function productForPurchase(catalog: GrooopexCatalog, slug: string): CatalogProd
   return product
 }
 
-async function verifiedUser(env: Env, accountId: string, sessionId: string, userId: number) {
-  const user = await withAccountSession(env, accountId, () => retrieveUser(sessionId))
+async function verifiedUser(env: Env, accountId: string, sessionId: string, userId: number, account: Awaited<ReturnType<typeof accountSecrets>>['account']) {
+  const user = await withAccountSession(env, accountId, account, () => retrieveUser(sessionId))
   if (user.id !== userId) {
     console.error('Grooop user identity or balance violated shop invariant', { accountId })
     throw new HttpError(409, 'account-identity-changed', 'Account identity changed')
@@ -90,8 +90,8 @@ async function verifiedUser(env: Env, accountId: string, sessionId: string, user
 }
 
 async function getShop(env: Env, accountId: string): Promise<Response> {
-  const { sessionId } = await accountSecrets(env, accountId)
-  const parameters = parseTtmcParameters(await withAccountSession(env, accountId, () =>
+  const { account, sessionId } = await accountSecrets(env, accountId)
+  const parameters = parseTtmcParameters(await withAccountSession(env, accountId, account, () =>
     grooopRequest<unknown>('party/parameters', { sessionId })))
   const [min, max, defaultRounds, step] = parameters.rounds
   return json({
@@ -117,9 +117,9 @@ async function updatePurchase(env: Env, id: string, status: PurchaseRow['status'
     .bind(status, errorCode, now, status, now, status, now, id).run()
 }
 
-async function reconcile(env: Env, purchase: PurchaseRow, sessionId: string, userId: number): Promise<Response> {
-  const [catalog, user] = await withAccountSession(env, purchase.account_id, async () => Promise.all([
-    loadCatalog(sessionId), verifiedUser(env, purchase.account_id, sessionId, userId),
+async function reconcile(env: Env, purchase: PurchaseRow, sessionId: string, userId: number, account: Awaited<ReturnType<typeof accountSecrets>>['account']): Promise<Response> {
+  const [catalog, user] = await withAccountSession(env, purchase.account_id, account, async () => Promise.all([
+    loadCatalog(sessionId), verifiedUser(env, purchase.account_id, sessionId, userId, account),
   ]))
   const owned = catalog.extensions.find((product) => product.slug === purchase.product_slug)?.isBought === true
   if (!owned) throw new HttpError(409, 'purchase-unresolved', 'The previous purchase outcome is unresolved')
@@ -139,6 +139,7 @@ async function existingPurchaseResponse(
   sessionId: string,
   userId: number,
   balance: number,
+  account: Awaited<ReturnType<typeof accountSecrets>>['account'],
 ): Promise<Response> {
   if (purchase.request_fingerprint !== fingerprint) {
     throw new HttpError(409, 'idempotency-conflict', 'Idempotency key was used for a different purchase')
@@ -149,7 +150,7 @@ async function existingPurchaseResponse(
   if (purchase.status === 'rejected') {
     throw new HttpError(422, purchase.error_code ?? 'purchase-rejected', 'The purchase was rejected')
   }
-  return reconcile(env, purchase, sessionId, userId)
+  return reconcile(env, purchase, sessionId, userId, account)
 }
 
 async function purchaseExtension(request: Request, env: Env, accountId: string, slug: string): Promise<Response> {
@@ -161,10 +162,10 @@ async function purchaseExtension(request: Request, env: Env, accountId: string, 
   const fingerprint = await sha256(JSON.stringify({ accountId, slug, expectedPrice: input.expectedPrice }))
   const { account, sessionId } = await accountSecrets(env, accountId)
   const existing = await env.DB.prepare('SELECT * FROM shop_purchases WHERE idempotency_key = ?').bind(input.idempotencyKey).first<PurchaseRow>()
-  if (existing) return existingPurchaseResponse(env, existing, fingerprint, sessionId, account.grooop_user_id, account.grooopies)
+  if (existing) return existingPurchaseResponse(env, existing, fingerprint, sessionId, account.grooop_user_id, account.grooopies, account)
 
-  const [catalog, user] = await withAccountSession(env, accountId, async () => Promise.all([
-    loadCatalog(sessionId), verifiedUser(env, accountId, sessionId, account.grooop_user_id),
+  const [catalog, user] = await withAccountSession(env, accountId, account, async () => Promise.all([
+    loadCatalog(sessionId), verifiedUser(env, accountId, sessionId, account.grooop_user_id, account),
   ]))
   productForPurchase(catalog, slug)
   if (!catalog.ttmcOwned) throw new HttpError(422, 'game-mode-not-bought', 'TTMC must be owned first')
@@ -180,7 +181,7 @@ async function purchaseExtension(request: Request, env: Env, accountId: string, 
   } catch {
     const keyed = await env.DB.prepare('SELECT * FROM shop_purchases WHERE idempotency_key = ?')
       .bind(input.idempotencyKey).first<PurchaseRow>()
-    if (keyed) return existingPurchaseResponse(env, keyed, fingerprint, sessionId, account.grooop_user_id, account.grooopies)
+    if (keyed) return existingPurchaseResponse(env, keyed, fingerprint, sessionId, account.grooop_user_id, account.grooopies, account)
     const active = await env.DB.prepare(`SELECT id FROM shop_purchases
       WHERE account_id = ? AND product_slug = ? AND status IN ('pending', 'unknown', 'purchased')`)
       .bind(accountId, slug).first()
@@ -189,7 +190,7 @@ async function purchaseExtension(request: Request, env: Env, accountId: string, 
     throw new HttpError(500, 'purchase-persistence-failed', 'The purchase was not saved')
   }
   try {
-    const response = await withAccountSession(env, accountId, () => grooopRequest<unknown>(`shop/buy/extension/${slug}`, { method: 'POST', sessionId }))
+    const response = await withAccountSession(env, accountId, account, () => grooopRequest<unknown>(`shop/buy/extension/${slug}`, { method: 'POST', sessionId }))
     const status = extractStatus(response)
     if (status === 'success') {
       const balance = object(response)?.balance
@@ -211,7 +212,7 @@ async function purchaseExtension(request: Request, env: Env, accountId: string, 
     }
     if (status === 'product-already-bought') {
       await updatePurchase(env, id, 'unknown', 'product-already-bought')
-      return reconcile(env, { id, idempotency_key: input.idempotencyKey, request_fingerprint: fingerprint, account_id: accountId, product_slug: slug, expected_price: input.expectedPrice, status: 'unknown', error_code: 'product-already-bought' }, sessionId, account.grooop_user_id)
+      return reconcile(env, { id, idempotency_key: input.idempotencyKey, request_fingerprint: fingerprint, account_id: accountId, product_slug: slug, expected_price: input.expectedPrice, status: 'unknown', error_code: 'product-already-bought' }, sessionId, account.grooop_user_id, account)
     }
     console.error('Shop returned undocumented purchase outcome', { accountId, slug, status })
     await updatePurchase(env, id, 'unknown', 'undocumented-outcome')

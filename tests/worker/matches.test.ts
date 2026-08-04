@@ -30,7 +30,8 @@ describe('match integration', () => {
       '2026-07-31T10:00:00.000Z',
     ).run()
 
-    const cancel = vi.fn(async () => {
+    const cancel = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).endsWith('/internal/initialize')) return new Response(null, { status: 204 })
       const now = '2026-07-31T10:05:00.000Z'
       await env.DB.prepare("UPDATE matches SET status = 'cancelled', finished_at = ?, updated_at = ? WHERE id = ?")
         .bind(now, now, matchId).run()
@@ -48,6 +49,10 @@ describe('match integration', () => {
     )
     expect(response?.status).toBe(200)
     expect(await response!.json()).toMatchObject({ match: { id: matchId, status: 'cancelled' } })
+    expect(cancel).toHaveBeenCalledWith('https://match.internal/internal/initialize', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify({ matchId, recoverGameplay: false }),
+    }))
     expect(cancel).toHaveBeenCalledWith('https://match.internal/internal/cancel', { method: 'POST' })
 
     const replay = await handleMatchesApi(
@@ -55,10 +60,10 @@ describe('match integration', () => {
       testEnv,
     )
     expect(await replay!.json()).toMatchObject({ match: { id: matchId, status: 'cancelled' } })
-    expect(cancel).toHaveBeenCalledOnce()
+    expect(cancel).toHaveBeenCalledTimes(2)
   })
 
-  it('reconciles a live row when Grooop confirms that the lobby is gone', async () => {
+  it('requires the room to authoritatively project cancellation when the lobby is gone', async () => {
     const hostId = '44444444-4444-4444-8444-444444444444'
     const guestId = '55555555-5555-4555-8555-555555555555'
     const matchId = '66666666-6666-4666-8666-666666666666'
@@ -78,10 +83,12 @@ describe('match integration', () => {
       '2026-07-31T10:00:00.000Z',
       '2026-07-31T10:00:00.000Z',
     ).run()
-    const fetch = vi.fn(async () => Response.json({
-      error: 'party-socket-rejected',
-      message: 'Grooop rejected the party connection: lobby-not-found',
-    }, { status: 502 }))
+    const fetch = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).endsWith('/internal/initialize')) return new Response(null, { status: 204 })
+      await env.DB.prepare("UPDATE matches SET status = 'cancelled', finished_at = ?, updated_at = ? WHERE id = ?")
+        .bind('2026-07-31T10:05:00.000Z', '2026-07-31T10:05:00.000Z', matchId).run()
+      return Response.json({ status: 'cancelled' })
+    })
     const testEnv = {
       ...env,
       MATCHES: {
@@ -97,7 +104,7 @@ describe('match integration', () => {
 
     expect(response?.status).toBe(200)
     expect(await response!.json()).toMatchObject({ match: { id: matchId, status: 'cancelled' } })
-    expect(fetch).toHaveBeenCalledOnce()
+    expect(fetch).toHaveBeenCalledTimes(2)
   })
 
   it('quotes and creates one waiting party for repeated idempotency keys', async () => {
@@ -242,6 +249,20 @@ describe('match integration', () => {
       testEnv,
     )).rejects.toMatchObject({ status: 409, code: 'idempotency-conflict' })
 
+    await env.DB.prepare(
+      "UPDATE matches SET status = 'cancelled', finished_at = updated_at WHERE idempotency_key = ?",
+    ).bind(upperKey.toLowerCase()).run()
+    const cancelledReplay = await handleMatchesApi(
+      jsonRequest('/api/matches', 'POST', {
+        ...input,
+        expectedCost: 40,
+        idempotencyKey: upperKey.toLowerCase(),
+      }),
+      testEnv,
+    )
+    expect(cancelledReplay?.status).toBe(200)
+    expect(await cancelledReplay!.json()).toMatchObject({ match: { status: 'cancelled' } })
+
     const paths = outbound.map((request) => request.path)
     expect(paths.filter((path) => path === '/api/1.0/party/create')).toHaveLength(1)
     expect(paths.filter((path) => path === '/api/1.0/party/ABC123/query')).toHaveLength(1)
@@ -263,7 +284,7 @@ describe('match integration', () => {
     }>()
     expect(persisted).toMatchObject({
       idempotency_key: upperKey.toLowerCase(),
-      status: 'waiting',
+      status: 'cancelled',
       party_id: 555,
       cost: 40,
       game_mode: 'proximo',

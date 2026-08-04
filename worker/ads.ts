@@ -61,8 +61,8 @@ function waitForAd(): Promise<void> {
 }
 
 async function claimForAccount(env: Env, accountId: string): Promise<void> {
-  const { sessionId } = await accountSecrets(env, accountId)
-  await withAccountSession(env, accountId, async () => {
+  const { account, sessionId } = await accountSecrets(env, accountId)
+  await withAccountSession(env, accountId, account, async () => {
     const config = requireAdsConfig(await grooopRequest<unknown>('ads/state', { sessionId }))
     const remaining = config.totalWatchableVideos - config.userWatchedVideosToday
 

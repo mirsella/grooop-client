@@ -31,6 +31,12 @@ interface AccountRow {
   updated_at: string
 }
 
+export interface AccountSessionGeneration {
+  session_ciphertext: string
+  session_nonce: string
+  session_key_version: string
+}
+
 interface ChallengeRow {
   id: string
   email_ciphertext: string
@@ -96,17 +102,27 @@ async function listAccounts(env: Env): Promise<Response> {
   return json({ accounts: result.results.map(publicAccount) })
 }
 
-export async function markAccountReauthRequired(env: Env, accountId: string): Promise<void> {
+export async function markAccountReauthRequired(
+  env: Env,
+  accountId: string,
+  generation: AccountSessionGeneration,
+): Promise<void> {
   await env.DB.prepare(
-    `UPDATE accounts SET status = 'reauth-required', updated_at = ? WHERE id = ?`,
+    `UPDATE accounts SET status = 'reauth-required', updated_at = ?
+     WHERE id = ? AND status = 'active'
+       AND session_ciphertext = ? AND session_nonce = ? AND session_key_version = ?`,
   )
-    .bind(new Date().toISOString(), accountId)
+    .bind(
+      new Date().toISOString(), accountId,
+      generation.session_ciphertext, generation.session_nonce, generation.session_key_version,
+    )
     .run()
 }
 
 export async function withAccountSession<T>(
   env: Env,
   accountId: string,
+  generation: AccountSessionGeneration,
   operation: () => Promise<T>,
 ): Promise<T> {
   try {
@@ -114,7 +130,7 @@ export async function withAccountSession<T>(
   } catch (error) {
     if (error instanceof HttpError && error.code === 'grooop-unauthorized') {
       console.warn('Grooop session rejected; marking account for reauthentication', { accountId })
-      await markAccountReauthRequired(env, accountId)
+      await markAccountReauthRequired(env, accountId, generation)
     }
     throw error
   }
@@ -334,7 +350,7 @@ async function verifyChallenge(
 async function refreshAccount(request: Request, env: Env, accountId: string): Promise<Response> {
   assertSameOrigin(request)
   const { account, sessionId } = await accountSecrets(env, accountId)
-  await withAccountSession(env, accountId, async () => {
+  await withAccountSession(env, accountId, account, async () => {
     const user = await retrieveUser(sessionId)
     if (user.id !== account.grooop_user_id) {
       console.error('Refreshed Grooop session changed user identity')
@@ -358,7 +374,7 @@ async function deleteAccount(request: Request, env: Env, accountId: string): Pro
   const activeMatch = await env.DB.prepare(
     `SELECT id FROM matches
      WHERE (host_account_id = ? OR guest_account_id = ?)
-       AND status NOT IN ('finished', 'error')
+        AND status IN ('creating', 'joining', 'waiting', 'playing', 'revealed')
      LIMIT 1`,
   )
     .bind(accountId, accountId)
