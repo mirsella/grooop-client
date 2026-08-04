@@ -56,6 +56,7 @@ type Draft = {
   gameMode: GameMode;
   rounds: number;
   ttmcContentSlugs: string[];
+  ttmcSelectionInitialized: boolean;
 };
 type RosterChange =
   | { type: "set"; index: number; value: string }
@@ -99,6 +100,7 @@ type TtmcCatalogResource =
 type TtmcSelection = { slugs: string[]; all: boolean };
 
 const sides: Side[] = ["a", "b"];
+const draftStorageKey = "grooop-client.match-draft";
 const initialDraft: Draft = {
   host: "a",
   accountIds: { a: "", b: "" },
@@ -111,6 +113,7 @@ const initialDraft: Draft = {
   gameMode: "proximo",
   rounds: 5,
   ttmcContentSlugs: [],
+  ttmcSelectionInitialized: false,
 };
 const content: ReadonlyArray<readonly [ContentSlug, string, string]> = [
   ["all", "All", "All four categories, shuffled together"],
@@ -119,6 +122,70 @@ const content: ReadonlyArray<readonly [ContentSlug, string, string]> = [
   ["geographie", "Geography", "Maps, cities & landmarks"],
   ["sciences", "Sciences", "Experiments, nature & why"],
 ];
+
+function isStoredTeam(value: unknown): value is Draft["teams"][Side] {
+  if (
+    !isRecord(value) ||
+    typeof value.name !== "string" ||
+    value.name.length > 40
+  )
+    return false;
+  return (
+    Array.isArray(value.roster) &&
+    value.roster.length >= 1 &&
+    value.roster.length <= 12 &&
+    value.roster.every(
+      (player) => typeof player === "string" && player.length <= 40,
+    )
+  );
+}
+
+function isStoredDraft(value: unknown): value is Draft {
+  if (!isRecord(value)) return false;
+  const accountIds = value.accountIds;
+  const teams = value.teams;
+  return (
+    (value.host === "a" || value.host === "b") &&
+    isRecord(accountIds) &&
+    typeof accountIds.a === "string" &&
+    accountIds.a.length <= 128 &&
+    typeof accountIds.b === "string" &&
+    accountIds.b.length <= 128 &&
+    isRecord(teams) &&
+    isStoredTeam(teams.a) &&
+    isStoredTeam(teams.b) &&
+    content.some(([slug]) => slug === value.contentSlug) &&
+    [15, 30, 45].includes(value.durationMinutes as number) &&
+    (value.gameMode === "proximo" || value.gameMode === "ttmc") &&
+    Number.isInteger(value.rounds) &&
+    (value.rounds as number) >= 2 &&
+    (value.rounds as number) <= 10 &&
+    Array.isArray(value.ttmcContentSlugs) &&
+    value.ttmcContentSlugs.length <= 100 &&
+    value.ttmcContentSlugs.every(
+      (slug) => typeof slug === "string" && slug.length <= 128,
+    ) &&
+    typeof value.ttmcSelectionInitialized === "boolean"
+  );
+}
+
+function loadStoredDraft(): { draft: Draft; restored: boolean } {
+  try {
+    const stored = localStorage.getItem(draftStorageKey);
+    if (stored === null) return { draft: initialDraft, restored: false };
+    const payload: unknown = JSON.parse(stored);
+    if (
+      isRecord(payload) &&
+      payload.version === 1 &&
+      isStoredDraft(payload.draft)
+    )
+      return { draft: payload.draft, restored: true };
+    console.warn("Ignoring invalid saved match setup.");
+  } catch (error) {
+    console.warn("Could not load the saved match setup.", error);
+  }
+  return { draft: initialDraft, restored: false };
+}
 
 function cleanTeam(team: Draft["teams"][Side]) {
   return {
@@ -642,7 +709,20 @@ function useLiveMatch(
 
 function App() {
   const [tab, setTab] = useState<Tab>("play");
-  const [draft, setDraft] = useState(initialDraft);
+  const restoredTtmcSelection = useRef<{
+    hostAccountId: string;
+    slugs: string[];
+  } | null>(null);
+  const [draft, setDraft] = useState(() => {
+    const stored = loadStoredDraft();
+    if (stored.restored && stored.draft.ttmcSelectionInitialized) {
+      restoredTtmcSelection.current = {
+        hostAccountId: stored.draft.accountIds[stored.draft.host],
+        slugs: stored.draft.ttmcContentSlugs,
+      };
+    }
+    return stored.draft;
+  });
   const [quote, setQuote] = useState<
     (MatchQuote & { idempotencyKey: string; setup: MatchSetup }) | null
   >(null);
@@ -755,6 +835,17 @@ function App() {
     });
   }
 
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        draftStorageKey,
+        JSON.stringify({ version: 1, draft }),
+      );
+    } catch (error) {
+      console.warn("Could not save the match setup.", error);
+    }
+  }, [draft]);
+
   async function loadAccounts() {
     const version = ++accountLoadVersion.current;
     setLoadingAccounts(true);
@@ -765,6 +856,10 @@ function App() {
       const active = loaded.filter(isActive);
       setAccounts(loaded);
       editDraft((current) => {
+        const assignmentsValid =
+          current.accountIds.a !== current.accountIds.b &&
+          active.some((account) => account.id === current.accountIds.a) &&
+          active.some((account) => account.id === current.accountIds.b);
         const a = active.some((account) => account.id === current.accountIds.a)
           ? current.accountIds.a
           : (active[0]?.id ?? "");
@@ -777,7 +872,9 @@ function App() {
         return {
           ...current,
           accountIds,
-          host: lowestBalanceSide(accountIds, active, current.host),
+          host: assignmentsValid
+            ? current.host
+            : lowestBalanceSide(accountIds, active, current.host),
         };
       });
     } catch (error) {
@@ -813,6 +910,7 @@ function App() {
     hostAccountId: draft.accountIds[draft.host],
     rounds: draft.rounds,
     slugs: draft.ttmcContentSlugs,
+    initialized: draft.ttmcSelectionInitialized,
   }));
   useEffect(() => {
     if (draft.gameMode !== "ttmc" || !ttmcHostAccountId) {
@@ -827,14 +925,22 @@ function App() {
         setTtmcCatalog({ status: "ready", hostAccountId: ttmcHostAccountId, data: catalog });
         const available = catalog.contents.map((item) => item.slug);
         const previous = ttmcSelections.current.get(ttmcHostAccountId);
+        const restored = restoredTtmcSelection.current;
         const selected = previous?.all
           ? available
           : previous
             ? previous.slugs.filter((slug) => available.includes(slug))
-            : available;
+            : restored?.hostAccountId === ttmcHostAccountId
+              ? restored.slugs.filter((slug) => available.includes(slug))
+              : available;
+        if (restored?.hostAccountId === ttmcHostAccountId)
+          restoredTtmcSelection.current = null;
+        const all =
+          selected.length === available.length &&
+          available.every((slug) => selected.includes(slug));
         ttmcSelections.current.set(ttmcHostAccountId, {
           slugs: selected,
-          all: previous?.all ?? true,
+          all,
         });
         const currentSetup = currentTtmcSetup();
         const rounds = catalog.rounds;
@@ -847,13 +953,15 @@ function App() {
           currentSetup.hostAccountId !== ttmcHostAccountId ||
           (selected.length === currentSetup.slugs.length &&
             selected.every((slug, index) => slug === currentSetup.slugs[index]) &&
-            roundsValid)
+            roundsValid &&
+            currentSetup.initialized)
         ) return;
         editDraft((current) => {
           if (current.gameMode !== "ttmc" || current.accountIds[current.host] !== ttmcHostAccountId) return current;
           return {
             ...current,
             ttmcContentSlugs: selected,
+            ttmcSelectionInitialized: true,
             rounds: roundsValid ? current.rounds : rounds.default,
           };
         });
@@ -1230,6 +1338,7 @@ function App() {
       return {
         ...current,
         ttmcContentSlugs: ordered,
+        ttmcSelectionInitialized: true,
       };
     });
   }
@@ -1237,7 +1346,11 @@ function App() {
   function selectAllTtmcContents() {
     const slugs = ttmcContents.map((content) => content.slug);
     ttmcSelections.current.set(ttmcHostAccountId, { slugs, all: true });
-    editDraft((current) => ({ ...current, ttmcContentSlugs: slugs }));
+    editDraft((current) => ({
+      ...current,
+      ttmcContentSlugs: slugs,
+      ttmcSelectionInitialized: true,
+    }));
   }
 
   async function submitMatch() {
@@ -1668,6 +1781,9 @@ function App() {
             <b>Pass the phone.</b> One person hosts; everybody else brings a
             loud opinion.
           </div>
+          <p className="setup-memory" role="status">
+            Lineup and game setup save automatically on this device.
+          </p>
           {initialRestoreState === "loading" && (
             <p className="restore-note" role="status">
               Checking for an active match before opening the match desk…

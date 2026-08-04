@@ -755,6 +755,21 @@ test('does not broaden an empty custom TTMC selection after refresh', async ({ p
   await expect(page.locator('.create-button')).toBeDisabled()
 })
 
+test('does not broaden an empty custom TTMC selection after reload', async ({ page }) => {
+  await page.goto('/')
+  await page.getByRole('radio', { name: /TTMC/i }).check()
+  for (const name of ['Included', 'TTMC Musique', 'TTMC Bonne Bouffe']) {
+    await page.getByRole('checkbox', { name }).uncheck()
+  }
+
+  await page.reload()
+
+  for (const name of ['Included', 'TTMC Musique', 'TTMC Bonne Bouffe']) {
+    await expect(page.getByRole('checkbox', { name })).not.toBeChecked()
+  }
+  await expect(page.locator('.create-button')).toBeDisabled()
+})
+
 test('retries a failed TTMC catalog load', async ({ page }) => {
   const api = apiState(page)
   api.ttmcCatalogFailuresRemaining['account-b'] = 1
@@ -962,6 +977,37 @@ test('defaults the host to the selected account with fewer grooopies', async ({ 
   expect(api.createBodies[0].hostAccountId).toBe('account-b')
 })
 
+test('remembers the complete match setup on this device', async ({ page }) => {
+  const api = apiState(page)
+  api.accounts.push({ id: 'account-c', email: 'third@example.com', userId: 34871, grooopies: 1200, status: 'active' })
+  await page.goto('/')
+  await expect(page.getByText('Lineup and game setup save automatically on this device.')).toBeVisible()
+  await page.getByLabel('Team A account').selectOption('account-c')
+  await page.getByLabel('Host').selectOption('b')
+  await page.getByLabel('Team A name').fill('Night Owls')
+  await page.getByLabel('Team B name').fill('Early Birds')
+  await page.getByRole('textbox', { name: 'Team A player 1' }).fill('Mina')
+  await page.getByRole('textbox', { name: 'Team B player 2' }).fill('Jules')
+  await page.getByRole('radio', { name: /TTMC/i }).check()
+  await page.getByRole('checkbox', { name: 'TTMC Bonne Bouffe' }).uncheck()
+  await page.getByRole('slider', { name: 'Topics' }).fill('8')
+
+  await page.reload()
+
+  await expect(page.getByLabel('Team A account')).toHaveValue('account-c')
+  await expect(page.getByLabel('Team B account')).toHaveValue('account-b')
+  await expect(page.getByLabel('Host')).toHaveValue('b')
+  await expect(page.getByLabel('Team A name')).toHaveValue('Night Owls')
+  await expect(page.getByLabel('Team B name')).toHaveValue('Early Birds')
+  await expect(page.getByRole('textbox', { name: 'Team A player 1' })).toHaveValue('Mina')
+  await expect(page.getByRole('textbox', { name: 'Team B player 2' })).toHaveValue('Jules')
+  await expect(page.getByRole('radio', { name: /TTMC/i })).toBeChecked()
+  await expect(page.getByRole('checkbox', { name: 'Included' })).toBeChecked()
+  await expect(page.getByRole('checkbox', { name: 'TTMC Musique' })).toBeChecked()
+  await expect(page.getByRole('checkbox', { name: 'TTMC Bonne Bouffe' })).not.toBeChecked()
+  await expect(page.getByRole('slider', { name: 'Topics' })).toHaveValue('8')
+})
+
 test('restores the newest active match after a page reload', async ({ page }) => {
   apiState(page).matches = [structuredClone(match)]
   await page.goto('/')
@@ -971,8 +1017,10 @@ test('restores the newest active match after a page reload', async ({ page }) =>
   await page.reload()
   await expect(page.getByRole('heading', { name: /ON THE AIR/i })).toBeVisible()
   await expect(page.getByText('Live connection')).toBeVisible()
-  expect(await page.evaluate(() => ({ local: localStorage.length, session: sessionStorage.length })))
-    .toEqual({ local: 0, session: 0 })
+  expect(await page.evaluate(() => ({
+    local: Object.keys(localStorage),
+    session: sessionStorage.length,
+  }))).toEqual({ local: ['grooop-client.match-draft'], session: 0 })
 })
 
 test('resumes a joining match after reload without creating another party', async ({ page }) => {
@@ -1613,7 +1661,28 @@ test('emits no console errors and leaves no browser-stored secrets', async ({ pa
     cookie: document.cookie,
     databases: 'databases' in indexedDB ? await indexedDB.databases() : [],
   }))
-  expect(storage).toEqual({ local: [], session: [], cookie: '', databases: [] })
+  expect(storage.session).toEqual([])
+  expect(storage.cookie).toBe('')
+  expect(storage.databases).toEqual([])
+  expect(storage.local).toHaveLength(1)
+  expect(storage.local[0][0]).toBe('grooop-client.match-draft')
+  expect(JSON.parse(storage.local[0][1])).toEqual({
+    version: 1,
+    draft: {
+      host: 'b',
+      accountIds: { a: 'account-a', b: 'account-b' },
+      teams: {
+        a: { name: 'Team A', roster: ['Player one', 'Player two'] },
+        b: { name: 'Team B', roster: ['Player three', 'Player four'] },
+      },
+      contentSlug: 'all',
+      durationMinutes: 30,
+      gameMode: 'proximo',
+      rounds: 5,
+      ttmcContentSlugs: [],
+      ttmcSelectionInitialized: false,
+    },
+  })
   const cachedUrls = await page.evaluate(async () => {
     const requests = await Promise.all((await caches.keys()).map(async (name) => {
       return (await (await caches.open(name)).keys()).map((request) => request.url)
