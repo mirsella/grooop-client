@@ -648,11 +648,13 @@ function App() {
   >(null);
   const [playBusy, setPlayBusy] = useState<"quote" | "create" | null>(null);
   const [playError, setPlayError] = useState("");
+  const [quoteRefresh, setQuoteRefresh] = useState(0);
   const [initialRestoreState, setInitialRestoreState] = useState<
     "loading" | "ready" | "error"
   >("loading");
   const [initialRestoreError, setInitialRestoreError] = useState("");
   const quoteVersion = useRef(0);
+  const quoteController = useRef<AbortController | null>(null);
   const accountLoadVersion = useRef(0);
   const presetLoadVersion = useRef(0);
   const matchLoadVersion = useRef(0);
@@ -714,8 +716,16 @@ function App() {
   }
 
   function invalidateQuote() {
+    quoteController.current?.abort();
+    quoteController.current = null;
     quoteVersion.current += 1;
     setQuote(null);
+    setPlayBusy((current) => current === "quote" ? null : current);
+  }
+
+  function refreshQuote() {
+    invalidateQuote();
+    setQuoteRefresh((current) => current + 1);
   }
 
   function editDraft(change: (current: Draft) => Draft) {
@@ -1013,8 +1023,18 @@ function App() {
     !ttmcCatalogReady ? "Choose a TTMC host to load its packs." :
     !ttmcOwned ? "The selected host does not own TTMC." :
     ttmcContents.length === 0 ? "No TTMC packs are available for the selected host." :
-    !ttmcSelectionValid ? "Select at least one TTMC pack before requesting a quote." :
-    !ttmcRoundsValid ? "The TTMC topic count is unavailable." : "";
+    !ttmcSelectionValid ? "Select at least one TTMC pack to price this match." :
+     !ttmcRoundsValid ? "The TTMC topic count is unavailable." : "";
+
+  const setupSignature = JSON.stringify(setup);
+  const autoQuote = useEffectEvent(() => void requestQuote());
+  useEffect(() => {
+    if (!setupValid || initialRestoreState !== "ready") return;
+    const timer = window.setTimeout(autoQuote, 300);
+    return () => window.clearTimeout(timer);
+  }, [setupSignature, setupValid, initialRestoreState, quoteRefresh]);
+
+  useEffect(() => () => quoteController.current?.abort(), []);
 
   async function requestCode(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -1172,19 +1192,26 @@ function App() {
       return;
     }
     const version = ++quoteVersion.current;
+    quoteController.current?.abort();
+    const controller = new AbortController();
+    quoteController.current = controller;
     setQuote(null);
     setPlayBusy("quote");
     setPlayError("");
     try {
-      const result = await quoteMatch(setup);
+      const result = await quoteMatch(setup, controller.signal);
       if (quoteVersion.current === version) {
         setQuote({ ...result.quote, idempotencyKey: crypto.randomUUID(), setup });
       }
     } catch (error) {
+      if (controller.signal.aborted) return;
       if (quoteVersion.current === version)
         setPlayError(errorMessage(error, "Could not quote this match."));
     } finally {
-      setPlayBusy(null);
+      if (quoteVersion.current === version) {
+        quoteController.current = null;
+        setPlayBusy(null);
+      }
     }
   }
 
@@ -1238,7 +1265,7 @@ function App() {
       navigate("match");
     } catch (error) {
       if (error instanceof ApiError && error.code === "party-cost-changed") {
-        invalidateQuote();
+        refreshQuote();
       }
       setPlayError(errorMessage(error, "Could not create this match."));
     } finally {
@@ -1432,6 +1459,21 @@ function App() {
   const gameReady =
     (proximoGame?.scores.length ?? 0) >= 2 &&
     proximoGame?.scores.every((score) => score.isReady) === true;
+  const [autoReadyGameId, setAutoReadyGameId] = useState<number | null>(null);
+  const autoReadyGameIdRef = useRef<number | null>(null);
+  const automaticallyReady = useEffectEvent((gameId: number) => {
+    live.send({ type: "ready", gameId });
+  });
+  useEffect(() => {
+    if (
+      !proximoGame || !isGameId(proximoGame.id) || gameReady || gameRevealed ||
+      proximoGame.currentRound !== -1 || !gameplayEnabled || live.inFlightAction !== null ||
+      autoReadyGameIdRef.current === proximoGame.id
+    ) return;
+    autoReadyGameIdRef.current = proximoGame.id;
+    setAutoReadyGameId(proximoGame.id);
+    automaticallyReady(proximoGame.id);
+  }, [proximoGame, gameReady, gameRevealed, gameplayEnabled, live.inFlightAction]);
   const questionActive =
     proximoGame?.showAnswer === false &&
     typeof proximoGame.question === "string" &&
@@ -1996,7 +2038,7 @@ function App() {
                              </button>
                            ))}
                            {ttmcOwned && ttmcContents.length > 0 && <p className="ttmc-selection-help">Select at least one pack to play TTMC.</p>}
-                           {ttmcOwned && ttmcContents.length > 0 && !ttmcSelectionValid && <p className="api-error" role="alert">Select at least one TTMC pack before requesting a quote.</p>}
+                            {ttmcOwned && ttmcContents.length > 0 && !ttmcSelectionValid && <p className="api-error" role="alert">Select at least one TTMC pack to price this match.</p>}
                            <div className="pack-options">
                              {ttmcContents.map((content) => {
                                const checked = draft.ttmcContentSlugs.includes(content.slug);
@@ -2077,22 +2119,23 @@ function App() {
             ) : (
               <div className="cost">
                 <span>Cost</span>
-                <b>Quote required</b>
-                <small>Ask for today’s exact price.</small>
+                <b>
+                  {playBusy === "quote"
+                    ? "Pricing match…"
+                    : setupValid
+                      ? "Price unavailable"
+                      : "Finish setup"}
+                </b>
+                <small>
+                  {playBusy === "quote"
+                    ? "Checking today’s exact price."
+                    : setupValid
+                      ? "Retry pricing when you’re ready."
+                      : "Complete the match details to see the exact cost."}
+                </small>
               </div>
             )}
             <div className="quote-actions">
-              <button
-                type="button"
-                disabled={
-                  !setupValid ||
-                  playBusy !== null ||
-                  initialRestoreState !== "ready"
-                }
-                onClick={() => void requestQuote()}
-              >
-                {playBusy === "quote" ? "Quoting…" : "Quote match"}
-              </button>
               <button
                 className="create-button"
                 type="button"
@@ -2103,8 +2146,19 @@ function App() {
                 }
                 onClick={() => void submitMatch()}
               >
-                {playBusy === "create" ? "Creating…" : "Create match →"}
+                {playBusy === "create"
+                  ? "Creating match…"
+                  : quote
+                    ? `Create match — ${quote.cost} grooopies →`
+                    : playBusy === "quote"
+                      ? "Pricing match…"
+                      : "Finish setup"}
               </button>
+              {!quote && playError && setupValid && initialRestoreState === "ready" && playBusy === null && (
+                <button className="retry-quote" type="button" onClick={refreshQuote}>
+                  Retry price
+                </button>
+              )}
             </div>
             {playError && (
               <p className="cost-error" role="alert">
@@ -2870,22 +2924,32 @@ function App() {
                             type="button"
                             onClick={() => live.send({ type: "start-proximo" })}
                           >
-                            Start Proximo
+                            {live.inFlightAction?.type === "start-proximo"
+                              ? "Setting up question…"
+                              : "Start first question →"}
                           </button>
                         )}
                       {proximoGame &&
                         !gameRevealed &&
                         !gameReady &&
                         matchLive && (
-                          <button
-                            disabled={
-                               !gameplayEnabled || live.inFlightAction !== null
-                            }
-                            type="button"
-                            onClick={() => sendGameCommand("ready")}
-                          >
-                            Ready
-                          </button>
+                          live.inFlightAction?.type === "ready" ? (
+                            <p className="control-note" role="status">
+                              Opening the question…
+                            </p>
+                          ) : autoReadyGameId === proximoGame.id ? (
+                            <button
+                              disabled={!gameplayEnabled || live.inFlightAction !== null}
+                              type="button"
+                              onClick={() => live.send({ type: "ready", gameId: proximoGame.id })}
+                            >
+                              Retry opening question
+                            </button>
+                          ) : (
+                            <p className="control-note" role="status">
+                              Question setup is synchronizing…
+                            </p>
+                          )
                         )}
                       {proximoGame &&
                         gameRevealed &&
@@ -2900,7 +2964,7 @@ function App() {
                           >
                             {live.inFlightAction?.type === "next-proximo"
                               ? "Adding question…"
-                              : "Next question →"}
+                              : "Start next question →"}
                           </button>
                         )}
                     </div>

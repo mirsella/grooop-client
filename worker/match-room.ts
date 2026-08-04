@@ -440,13 +440,13 @@ export class MatchRoom implements DurableObject {
     return this.enqueue(() => this.cancel())
   }
 
-  private async ensureConnected(): Promise<void> {
+  private async ensureConnected(recoverGameplay = true): Promise<void> {
     if (this.terminalSnapshot) return
     if (this.host && this.guest) {
       const reconnecting = !this.host.connected || !this.guest.connected
       if (reconnecting) this.acceptQuestionTransitions = false
       await Promise.all([this.host.connect(), this.guest.connect()])
-      if (this.isTtmc()) await this.recoverTtmcState()
+      if (recoverGameplay && this.isTtmc()) await this.recoverTtmcState()
       if (reconnecting) {
         await this.syncQuestionTiming()
         this.acceptQuestionTransitions = true
@@ -455,7 +455,8 @@ export class MatchRoom implements DurableObject {
       return
     }
     this.initializing ??= this.initialize().finally(() => { this.initializing = null })
-    return this.initializing
+    await this.initializing
+    if (recoverGameplay && this.isTtmc()) await this.recoverTtmcState()
   }
 
   private async initialize(): Promise<void> {
@@ -535,7 +536,6 @@ export class MatchRoom implements DurableObject {
       changed,
     )
     await Promise.all([this.host.connect(), this.guest.connect()])
-    if (match.game_mode === 'ttmc') await this.recoverTtmcState()
     await this.publishState()
     this.acceptQuestionTransitions = true
   }
@@ -1145,7 +1145,7 @@ export class MatchRoom implements DurableObject {
 
   private async cancel(): Promise<void> {
     try {
-      await this.ensureConnected()
+      await this.ensureConnected(false)
     } catch (error) {
       if (
         !(error instanceof HttpError) || error.code !== 'party-lobby-not-found' ||
@@ -1169,6 +1169,14 @@ export class MatchRoom implements DurableObject {
     }
     const stored = await this.state.storage.get<StoredMutationAction>(CANCEL_ACTION_KEY)
     if (stored) {
+      const party = asObject(host.shared.get(0, 'party'))
+      if (party?.state === 'finished') {
+        this.cancelling = true
+        if (!await this.finalizeCancellation()) {
+          throw new HttpError(503, 'match-cancel-finalizing', 'Match cancellation is still being saved')
+        }
+        return
+      }
       throw new HttpError(409, 'match-cancel-outcome-unknown', 'A previous cancellation is awaiting reconciliation')
     }
 
@@ -1288,8 +1296,8 @@ export class MatchRoom implements DurableObject {
   private ttmcNumberStep(correct: number, tolerance: number): number | null {
     if (!Number.isFinite(correct) || !Number.isFinite(tolerance) || tolerance < 0) return null
     if (tolerance > 0 && tolerance < 1) {
-      if (tolerance === 0.1) return 0.1
-      if (tolerance === 0.01) return 0.01
+      if (tolerance >= 0.1) return 0.1
+      if (tolerance >= 0.01) return 0.01
       return 0.001
     }
     if (Number.isInteger(correct)) return tolerance >= 1_000 ? 100 : tolerance >= 100 ? 10 : 1

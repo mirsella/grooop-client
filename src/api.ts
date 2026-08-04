@@ -146,7 +146,7 @@ export const refreshAccount = (id: string) => request<{ account: Account }>(`/ap
 export const reauthenticateAccount = (id: string) => request<{ challenge: Challenge }>(`/api/accounts/${encodeURIComponent(id)}/reauthenticate`, { method: 'POST' })
 export const deleteAccount = (id: string) => request<void>(`/api/accounts/${encodeURIComponent(id)}`, { method: 'DELETE' })
 export const getTtmcCatalog = (id: string, signal?: AbortSignal) => request<TtmcCatalog>(`/api/accounts/${encodeURIComponent(id)}/shop`, { signal })
-export const quoteMatch = (setup: MatchSetup) => request<{ quote: MatchQuote }>('/api/matches/quote', { method: 'POST', body: JSON.stringify(setup) })
+export const quoteMatch = (setup: MatchSetup, signal?: AbortSignal) => request<{ quote: MatchQuote }>('/api/matches/quote', { method: 'POST', body: JSON.stringify(setup), signal })
 export const createMatch = (setup: MatchSetup, expectedCost: number, idempotencyKey: string) => request<{ match: Match }>('/api/matches', { method: 'POST', body: JSON.stringify({ ...setup, expectedCost, idempotencyKey }) })
 export const getMatches = () => request<{ matches: Match[] }>('/api/matches')
 export const resumeMatch = (id: string) => request<{ match: Match }>(`/api/matches/${encodeURIComponent(id)}/resume`, { method: 'POST' })

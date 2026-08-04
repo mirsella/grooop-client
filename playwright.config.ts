@@ -1,9 +1,9 @@
 import { defineConfig, devices, type Project } from '@playwright/test'
 
 const projects: Project[] = [
-  { name: 'desktop-chromium', use: { ...devices['Desktop Chrome'] } },
-  { name: 'pixel-chromium', use: { ...devices['Pixel 7'] } },
-  { name: 'iphone-chromium', use: { ...devices['iPhone 15'], browserName: 'chromium' } },
+  { name: 'desktop-chromium', use: { ...devices['Desktop Chrome'], serviceWorkers: 'block' } },
+  { name: 'pixel-chromium', use: { ...devices['Pixel 7'], serviceWorkers: 'block' } },
+  { name: 'iphone-chromium', use: { ...devices['iPhone 15'], browserName: 'chromium', serviceWorkers: 'block' } },
 ]
 
 if (process.env.PLAYWRIGHT_WEBKIT) {

@@ -624,6 +624,23 @@ describe('MatchRoom command ordering', () => {
     expect(guest.request).toHaveBeenCalledWith(0, 'give-up', undefined)
   })
 
+  it('cancels without recovering an unsupported TTMC question', async () => {
+    const { room, host, guest, storage } = createHarness(null)
+    room.match.game_mode = 'ttmc'
+    room.match.rounds = 2
+    activateTtmcRound(room, host, guest)
+    addTtmcScore(host, guest, 101, 4)
+    storage.set('ttmc:start:12:101', { difficulty: 4 })
+    host.request.mockResolvedValue({ question: 'Unknown', answers: { selected: 'future-schema' } })
+    guest.request.mockResolvedValue('ok')
+
+    await expect(room.runCancellation()).resolves.toBeUndefined()
+
+    expect(host.request).not.toHaveBeenCalled()
+    expect(guest.request).toHaveBeenCalledWith(0, 'give-up', undefined)
+    expect(room.match.status).toBe('cancelled')
+  })
+
   it('releases a match only when Grooop confirms that its lobby no longer exists', async () => {
     const missing = createHarness(null)
     missing.host.connect.mockRejectedValue(new HttpError(
@@ -964,14 +981,25 @@ describe('MatchRoom command ordering', () => {
     activateTtmcRound(number.room, number.host, number.guest)
     addTtmcScore(number.host, number.guest, 101, 4)
     number.storage.set('ttmc:question:12:101', {
-      raw: { question: 'How many?', answers: { selected: 'number', correct: 42, min: 0, max: 100, tolerance: 1 } },
-      public: { type: 'number', prompt: 'How many?', min: 0, max: 100, step: 1 },
+      raw: { question: 'How many?', answers: { selected: 'number', correct: 42, min: 0, max: 100, tolerance: 0.5 } },
+      public: { type: 'number', prompt: 'How many?', min: 0, max: 100, step: 0.1 },
     })
     number.host.request.mockResolvedValue({ success: true })
-    await expect(number.room.handleCommand({ type: 'ttmc-answers', roundId: 12, answers: { a: 42 } })).resolves.toEqual(['accepted'])
-    await expect(number.room.handleCommand({ type: 'ttmc-answers', roundId: 12, answers: { a: 42.5 } }))
+    await expect(number.room.handleCommand({ type: 'ttmc-answers', roundId: 12, answers: { a: 42.5 } })).resolves.toEqual(['accepted'])
+    await expect(number.room.handleCommand({ type: 'ttmc-answers', roundId: 12, answers: { a: 42.55 } }))
       .rejects.toMatchObject({ code: 'invalid-answers' })
-    expect(number.host.request).toHaveBeenCalledWith(12, 'answer', 42)
+    expect(number.host.request).toHaveBeenCalledWith(12, 'answer', 42.5)
+
+    const decimalNumber = createHarness(null)
+    activateTtmcRound(decimalNumber.room, decimalNumber.host, decimalNumber.guest)
+    addTtmcScore(decimalNumber.host, decimalNumber.guest, 101, 4)
+    decimalNumber.storage.set('ttmc:question:12:101', {
+      raw: { question: 'How precise?', answers: { selected: 'number', correct: 4.2, min: 0, max: 10, tolerance: 0.05 } },
+      public: { type: 'number', prompt: 'How precise?', min: 0, max: 10, step: 0.01 },
+    })
+    decimalNumber.host.request.mockResolvedValue({ success: true })
+    await expect(decimalNumber.room.handleCommand({ type: 'ttmc-answers', roundId: 12, answers: { a: 4.25 } })).resolves.toEqual(['accepted'])
+    expect(decimalNumber.host.request).toHaveBeenCalledWith(12, 'answer', 4.25)
 
     const oneword = createHarness(null)
     activateTtmcRound(oneword.room, oneword.host, oneword.guest)

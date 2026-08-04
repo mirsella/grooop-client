@@ -61,6 +61,8 @@ type MockApiState = {
   createFailuresRemaining: number
   createDelay: number
   costChangesRemaining: number
+  quoteRequests: RequestBody[]
+  quoteFailuresRemaining: number
   createdMatchStatus: string
   createBodies: RequestBody[]
   presetCreates: RequestBody[]
@@ -98,6 +100,8 @@ async function mockApi(page: Page): Promise<MockApiState> {
     createFailuresRemaining: 0,
     createDelay: 0,
     costChangesRemaining: 0,
+    quoteRequests: [],
+    quoteFailuresRemaining: 0,
     createdMatchStatus: 'waiting',
     createBodies: [],
     presetCreates: [],
@@ -136,6 +140,11 @@ async function mockApi(page: Page): Promise<MockApiState> {
     }
     if (url.pathname === '/api/team-presets' && method === 'GET') return fulfill(route, { presets: state.presets })
     if (url.pathname === '/api/matches/quote' && request.method() === 'POST') {
+      state.quoteRequests.push(request.postDataJSON() as RequestBody)
+      if (state.quoteFailuresRemaining > 0) {
+        state.quoteFailuresRemaining -= 1
+        return fulfill(route, { error: 'quote-failed', message: 'Could not price this match.' }, 503)
+      }
       return fulfill(route, { quote: {
         cost: 100,
         userCanSpend: true,
@@ -326,7 +335,7 @@ async function mockLiveSocket(page: Page) {
         commands.push(command)
         if (rejectNextCommandType === command.type) {
           rejectNextCommandType = null
-          this.emit({ type: 'action-error', actionId: command.actionId, message: 'Answer rejected for this test.' })
+          setTimeout(() => this.emit({ type: 'action-error', actionId: command.actionId, message: 'Answer rejected for this test.' }), 0)
           return
         }
         if (command.type === 'start-proximo' || command.type === 'next-proximo') {
@@ -544,8 +553,7 @@ function tabButton(page: Page, name: string) {
 
 async function createMatchFromQuote(page: Page) {
   await page.goto('/')
-  await page.getByRole('button', { name: 'Quote match' }).click()
-  const create = page.getByRole('button', { name: 'Create match →' })
+  const create = page.getByRole('button', { name: /Create match — 100 grooopies/ })
   await expect(create).toBeEnabled()
   await create.focus()
   await create.press('Enter')
@@ -554,8 +562,7 @@ async function createMatchFromQuote(page: Page) {
 
 async function startQuestion(page: Page) {
   await createMatchFromQuote(page)
-  await page.getByRole('button', { name: 'Start Proximo' }).click()
-  await page.getByRole('button', { name: 'Ready' }).click()
+  await page.getByRole('button', { name: 'Start first question →' }).click()
   await expect(page.getByRole('heading', { name: 'How many roads must a player walk down?' })).toBeVisible()
 }
 
@@ -563,8 +570,7 @@ async function startTtmcMatch(page: Page) {
   await page.goto('/')
   await page.getByRole('radio', { name: /TTMC/i }).check()
   await expect(page.getByRole('checkbox', { name: 'Included' })).toBeChecked()
-  await page.getByRole('button', { name: 'Quote match' }).click()
-  await page.getByRole('button', { name: 'Create match →' }).click()
+  await page.getByRole('button', { name: /Create match — 100 grooopies/ }).click()
   await expect(page.getByText('Live connection')).toBeVisible()
   await page.evaluate(() => {
     (globalThis as typeof globalThis & { __e2eSetTtmcWaiting: () => void }).__e2eSetTtmcWaiting()
@@ -573,23 +579,39 @@ async function startTtmcMatch(page: Page) {
   await expect(page.getByRole('heading', { name: 'TTMC' })).toBeVisible()
 }
 
-test('invalidates an exact quote when setup changes', async ({ page }) => {
+test('automatically refreshes an exact quote when setup changes', async ({ page }) => {
+  const api = apiState(page)
   await page.goto('/')
   await expect(page.getByRole('heading', { name: /LET’S PLAY/i })).toBeVisible()
-  await page.getByRole('button', { name: 'Quote match' }).click()
-  await expect(page.getByText('100 grooopies')).toBeVisible()
+  await expect(page.getByText('100 grooopies', { exact: true })).toBeVisible()
+  const previousQuotes = api.quoteRequests.length
 
   await page.getByRole('textbox', { name: 'Team A name' }).fill('North Side')
-  await expect(page.getByText('Quote required')).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Create match →' })).toBeDisabled()
+  await expect.poll(() => api.quoteRequests.length).toBeGreaterThan(previousQuotes)
+  await expect(page.getByRole('button', { name: /Create match — 100 grooopies/ })).toBeEnabled()
+  expect(api.quoteRequests.at(-1)?.teamA).toMatchObject({ name: 'North Side' })
+})
+
+test('recovers from an automatic pricing failure without recreating the setup', async ({ page }) => {
+  const api = apiState(page)
+  api.quoteFailuresRemaining = 1
+  api.allowedBrowserErrors.push(/status of 503 \(Service Unavailable\)/)
+  await page.goto('/')
+
+  await expect(page.getByRole('alert')).toHaveText('Could not price this match.')
+  await expect(page.getByRole('button', { name: 'Retry price' })).toBeVisible()
+  await page.getByRole('button', { name: 'Retry price' }).click()
+
+  await expect(page.getByRole('button', { name: /Create match — 100 grooopies/ })).toBeEnabled()
+  expect(api.quoteRequests).toHaveLength(2)
+  expect(api.quoteRequests[1]).toEqual(api.quoteRequests[0])
 })
 
 test('selects all Proximo categories by default', async ({ page }) => {
   const api = apiState(page)
   await page.goto('/')
   await expect(page.getByRole('radio', { name: /^all /i })).toBeChecked()
-  await page.getByRole('button', { name: 'Quote match' }).click()
-  await page.getByRole('button', { name: 'Create match →' }).click()
+  await page.getByRole('button', { name: /Create match — 100 grooopies/ }).click()
   expect(api.createBodies[0].contentSlug).toBe('all')
 })
 
@@ -607,22 +629,19 @@ test('selects TTMC packs, invalidates its quote, and records them', async ({ pag
   await bonneBouffe.uncheck()
   const selectAll = page.getByRole('button', { name: 'Select all packs' })
   await expect(selectAll).toBeEnabled()
-  await page.getByRole('button', { name: 'Quote match' }).click()
-  await expect(page.getByText('100 grooopies')).toBeVisible()
+  await expect(page.getByText('100 grooopies', { exact: true })).toBeVisible()
   await selectAll.click()
   await expect(included).toBeChecked()
   await expect(musique).toBeChecked()
   await expect(bonneBouffe).toBeChecked()
   await expect(page.locator('.ttmc-all-packs').filter({ hasText: 'All packs selected' })).toBeVisible()
-  await expect(page.getByText('Quote required')).toBeVisible()
   const topics = page.getByRole('slider', { name: 'Topics' })
   await expect(topics).toHaveAttribute('min', '2')
   await expect(topics).toHaveAttribute('max', '10')
   await expect(topics).toHaveValue('5')
   await topics.fill('7')
   await expect(page.getByText('7', { exact: true })).toBeVisible()
-  await page.getByRole('button', { name: 'Quote match' }).click()
-  await page.getByRole('button', { name: 'Create match →' }).click()
+  await page.getByRole('button', { name: /Create match — 100 grooopies/ }).click()
   expect(api.createBodies[0]).toMatchObject({ gameMode: 'ttmc', rounds: 7 })
   expect(api.createBodies[0].ttmcContentSlugs).toEqual(['included', 'ttmc-musique', 'ttmc-bonnebouffe'])
   expect(api.createBodies[0]).not.toHaveProperty('contentSlug')
@@ -638,12 +657,12 @@ test('uses only the current host TTMC catalog and ownership', async ({ page }) =
   await page.goto('/')
   await page.getByRole('radio', { name: /TTMC/i }).check()
   await expect(page.getByRole('alert').filter({ hasText: 'The selected host does not own TTMC.' })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Quote match' })).toBeDisabled()
+  await expect(page.locator('.create-button')).toBeDisabled()
 
   await page.getByRole('combobox', { name: /^Host/ }).selectOption('a')
   await expect(page.getByRole('checkbox', { name: 'Available host pack' })).toBeChecked()
   await expect(page.getByText('Unavailable host pack')).toHaveCount(0)
-  await expect(page.getByRole('button', { name: 'Quote match' })).toBeEnabled()
+  await expect(page.getByRole('button', { name: /Create match — 100 grooopies/ })).toBeEnabled()
 })
 
 test('discards a stale TTMC catalog after the host changes', async ({ page }) => {
@@ -732,8 +751,8 @@ test('does not broaden an empty custom TTMC selection after refresh', async ({ p
   await page.locator('.account-list li').filter({ hasText: 'gmail.com' }).getByRole('button', { name: 'Refresh' }).click()
   await page.getByRole('button', { name: 'Play' }).click()
   await expect(page.getByRole('checkbox', { name: 'TTMC Cinema' })).not.toBeChecked()
-  await expect(page.getByRole('alert').filter({ hasText: 'Select at least one TTMC pack before requesting a quote.' })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Quote match' })).toBeDisabled()
+  await expect(page.getByRole('alert').filter({ hasText: 'Select at least one TTMC pack to price this match.' })).toBeVisible()
+  await expect(page.locator('.create-button')).toBeDisabled()
 })
 
 test('retries a failed TTMC catalog load', async ({ page }) => {
@@ -894,9 +913,7 @@ test('reconnects after a mismatched action result instead of leaving controls pe
   await page.evaluate(() => {
     (globalThis as typeof globalThis & { __e2eMalformedNextActionResult: () => void }).__e2eMalformedNextActionResult()
   })
-  await page.getByRole('button', { name: 'Start Proximo' }).click()
-  await expect(page.getByRole('button', { name: 'Ready' })).toBeEnabled()
-  await page.getByRole('button', { name: 'Ready' }).click()
+  await page.getByRole('button', { name: 'Start first question →' }).click()
   await expect(page.getByRole('heading', { name: 'How many roads must a player walk down?' })).toBeVisible()
 })
 
@@ -941,8 +958,7 @@ test('defaults the host to the selected account with fewer grooopies', async ({ 
   const api = apiState(page)
   await page.goto('/')
   await expect(page.getByLabel('Host')).toHaveValue('b')
-  await page.getByRole('button', { name: 'Quote match' }).click()
-  await page.getByRole('button', { name: 'Create match →' }).click()
+  await page.getByRole('button', { name: /Create match — 100 grooopies/ }).click()
   expect(api.createBodies[0].hostAccountId).toBe('account-b')
 })
 
@@ -975,9 +991,7 @@ test('uses one UUID idempotency key across a failed create retry', async ({ page
   api.createFailuresRemaining = 1
   api.allowedBrowserErrors.push(/status of 503 \(Service Unavailable\)/)
   await page.goto('/')
-  await page.getByRole('button', { name: 'Quote match' }).click()
-
-  const create = page.getByRole('button', { name: 'Create match →' })
+  const create = page.getByRole('button', { name: /Create match — 100 grooopies/ })
   await create.focus()
   await create.press('Enter')
   await expect(page.getByRole('alert')).toHaveText('Create failed. Try again.')
@@ -992,20 +1006,36 @@ test('uses one UUID idempotency key across a failed create retry', async ({ page
   expect(keys[1]).toBe(keys[0])
 })
 
+test('offers a retry when automatic Proximo readiness is rejected', async ({ page }) => {
+  await createMatchFromQuote(page)
+  await page.evaluate(() => {
+    (globalThis as typeof globalThis & { __e2eRejectNextCommand: (type: string) => void })
+      .__e2eRejectNextCommand('ready')
+  })
+
+  await page.getByRole('button', { name: 'Start first question →' }).click()
+  await expect(page.getByRole('alert')).toHaveText('Answer rejected for this test.')
+  await page.getByRole('button', { name: 'Retry opening question' }).click()
+
+  await expect(page.getByRole('heading', { name: 'How many roads must a player walk down?' })).toBeVisible()
+  expect(await page.evaluate(() => {
+    const commands = (globalThis as typeof globalThis & { __e2eSocketCommands: LiveCommand[] }).__e2eSocketCommands
+    return commands.filter((command) => command.type === 'start-proximo' || command.type === 'ready').map((command) => command.type)
+  })).toEqual(['start-proximo', 'ready', 'ready'])
+})
+
 test('clears a stale quote and idempotency key when the party cost changes', async ({ page }) => {
   const api = apiState(page)
   api.costChangesRemaining = 1
   api.allowedBrowserErrors.push(/status of 409 \(Conflict\)/)
   await page.goto('/')
-  await page.getByRole('button', { name: 'Quote match' }).click()
-  await page.getByRole('button', { name: 'Create match →' }).click()
+  await page.getByRole('button', { name: /Create match — 100 grooopies/ }).click()
 
   await expect(page.getByRole('alert')).toHaveText('Party cost changed; review the new quote')
-  await expect(page.getByText('Quote required')).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Create match →' })).toBeDisabled()
-
-  await page.getByRole('button', { name: 'Quote match' }).click()
-  await page.getByRole('button', { name: 'Create match →' }).click()
+  await expect.poll(() => api.quoteRequests.length).toBeGreaterThan(1)
+  const repriced = page.getByRole('button', { name: /Create match — 100 grooopies/ })
+  await expect(repriced).toBeEnabled()
+  await repriced.click()
   await expect(page.getByText('Live connection')).toBeVisible()
   expect(api.createBodies[1].idempotencyKey).not.toBe(api.createBodies[0].idempotencyKey)
 })
@@ -1013,8 +1043,7 @@ test('clears a stale quote and idempotency key when the party cost changes', asy
 test('rejects a created match whose status is not live', async ({ page }) => {
   apiState(page).createdMatchStatus = 'creating'
   await page.goto('/')
-  await page.getByRole('button', { name: 'Quote match' }).click()
-  await page.getByRole('button', { name: 'Create match →' }).click()
+  await page.getByRole('button', { name: /Create match — 100 grooopies/ }).click()
 
   await expect(page.getByRole('alert')).toHaveText('The match returned an invalid status: creating.')
   await expect(page.getByRole('heading', { name: /LET’S PLAY/i })).toBeVisible()
@@ -1128,10 +1157,9 @@ test('shows a prominent countdown and adds the next question in the same match',
   await page.evaluate(() => {
     (globalThis as typeof globalThis & { __e2eRevealAnswers: () => void }).__e2eRevealAnswers()
   })
-  const next = page.getByRole('button', { name: 'Next question →' })
+  const next = page.getByRole('button', { name: 'Start next question →' })
   await expect(next).toBeVisible()
   await next.click()
-  await page.getByRole('button', { name: 'Ready' }).click()
   await expect(page.getByRole('heading', { name: 'How many planets orbit the Sun?' })).toBeVisible()
   expect(await page.evaluate(() => {
     const commands = (globalThis as typeof globalThis & { __e2eSocketCommands: Array<Record<string, unknown>> }).__e2eSocketCommands
@@ -1180,12 +1208,12 @@ test('resets reconnect budget after valid state and offers a manual retry at the
   const retry = page.getByRole('button', { name: 'Retry live connection' })
   await expect(retry).toBeVisible()
   await expect(page.locator('.party-board')).toHaveCount(1)
-  await expect(page.getByRole('button', { name: 'Start Proximo' })).toBeDisabled()
+  await expect(page.getByRole('button', { name: 'Start first question →' })).toBeDisabled()
   await expect(page.getByRole('button', { name: 'End match' })).toBeDisabled()
   await retry.click()
   await expect(page.getByText('Live connection')).toBeVisible()
   await expect(page.locator('.party-board')).toHaveCount(1)
-  await expect(page.getByRole('button', { name: 'Start Proximo' })).toBeEnabled()
+  await expect(page.getByRole('button', { name: 'Start first question →' })).toBeEnabled()
 })
 
 test('renders observed questions in History', async ({ page }) => {
@@ -1237,8 +1265,7 @@ test('disables setup fields while match creation is in flight', async ({ page })
   const api = apiState(page)
   api.createDelay = 600
   await page.goto('/')
-  await page.getByRole('button', { name: 'Quote match' }).click()
-  await page.getByRole('button', { name: 'Create match →' }).click()
+  await page.getByRole('button', { name: /Create match — 100 grooopies/ }).click()
 
   await expect(page.getByRole('textbox', { name: 'Team A name' })).toBeDisabled()
   await expect(page.getByLabel('Team A account')).toBeDisabled()
@@ -1287,8 +1314,7 @@ test('blocks quote and create until a delayed active-match restore completes', a
   await page.goto('/')
 
   await expect(page.getByText('Checking for an active match before opening the match desk…')).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Quote match' })).toBeDisabled()
-  await expect(page.getByRole('button', { name: 'Create match →' })).toBeDisabled()
+  await expect(page.locator('.create-button')).toBeDisabled()
   await expect(page.getByRole('heading', { name: /ON THE AIR/i })).toBeVisible()
   expect(api.createBodies).toEqual([])
 })
@@ -1319,9 +1345,9 @@ test('shows an initial restore failure on Play and retries safely', async ({ pag
   await page.goto('/')
 
   await expect(page.getByRole('alert')).toContainText('Active match check failed upstream.')
-  await expect(page.getByRole('button', { name: 'Quote match' })).toBeDisabled()
+  await expect(page.locator('.create-button')).toBeDisabled()
   await page.getByRole('button', { name: 'Retry active-match check' }).click()
-  await expect(page.getByRole('button', { name: 'Quote match' })).toBeEnabled()
+  await expect(page.getByRole('button', { name: /Create match — 100 grooopies/ })).toBeEnabled()
 })
 
 test('conceals and submits one-phone Proximo answers independently', async ({ page }) => {
@@ -1355,12 +1381,12 @@ test('conceals and submits one-phone Proximo answers independently', async ({ pa
 
 test('deduplicates a double-click while an action is in flight', async ({ page }) => {
   await createMatchFromQuote(page)
-  await page.getByRole('button', { name: 'Start Proximo' }).dblclick()
+  await page.getByRole('button', { name: 'Start first question →' }).dblclick()
   expect(await page.evaluate(() => {
     return (globalThis as typeof globalThis & { __e2eSocketCommands: LiveCommand[] }).__e2eSocketCommands
       .filter((command) => command.type === 'start-proximo')
   })).toHaveLength(1)
-  await expect(page.getByRole('button', { name: 'Ready' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'How many roads must a player walk down?' })).toBeVisible()
 })
 
 test('fails closed for a null deadline and checks expiration again on submit', async ({ page }) => {
@@ -1469,8 +1495,11 @@ test('reloads accounts after an unauthorized refresh and offers reauthentication
   await expect(page.getByRole('button', { name: 'Re-authenticate' })).toBeVisible()
 })
 
-test('loads its cached application offline without caching API requests', async ({ page, context, browserName }) => {
-  test.skip(browserName === 'webkit', 'WebKit cannot route requests controlled by a service worker')
+test.describe('service worker', () => {
+  test.use({ serviceWorkers: 'allow' })
+
+  test('loads its cached application offline without caching API requests', async ({ page, context, browserName }) => {
+    test.skip(browserName === 'webkit', 'WebKit cannot route requests controlled by a service worker')
   await page.goto('/')
   const manifest = await page.evaluate(async () => {
     const response = await fetch('/manifest.webmanifest')
@@ -1528,6 +1557,7 @@ test('loads its cached application offline without caching API requests', async 
   } finally {
     await context.setOffline(false)
   }
+  })
 })
 
 test('has no horizontal overflow in mobile portrait or landscape', async ({ page }) => {
