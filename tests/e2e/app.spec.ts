@@ -83,6 +83,16 @@ type MockApiState = {
 const apiStates = new WeakMap<Page, MockApiState>()
 const browserErrors = new WeakMap<Page, string[]>()
 
+async function captureReadmeScreenshot(page: Page, name: string, fullPage = false) {
+  if (process.env.CAPTURE_README_SCREENSHOTS !== '1') return
+  await page.screenshot({
+    path: `docs/screenshots/${name}.png`,
+    animations: 'disabled',
+    caret: 'hide',
+    fullPage,
+  })
+}
+
 async function fulfill(route: Route, body: unknown, status = 200) {
   await route.fulfill({
     status,
@@ -624,7 +634,7 @@ test('selects all Proximo categories by default', async ({ page }) => {
   expect(api.createBodies[0].contentSlug).toBe('all')
 })
 
-test('selects TTMC packs, invalidates its quote, and records them', async ({ page }) => {
+test('selects TTMC packs, invalidates its quote, and records them', async ({ page }, testInfo) => {
   const api = apiState(page)
   await page.goto('/')
   await page.getByRole('radio', { name: /TTMC/i }).check()
@@ -650,6 +660,11 @@ test('selects TTMC packs, invalidates its quote, and records them', async ({ pag
   await expect(topics).toHaveValue('5')
   await topics.fill('7')
   await expect(page.getByText('7', { exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: /Create match — 100 grooopies/ })).toBeEnabled()
+  if (testInfo.project.name === 'desktop-chromium') {
+    await page.evaluate(() => scrollTo(0, 0))
+    await captureReadmeScreenshot(page, 'setup-desktop', true)
+  }
   await page.getByRole('button', { name: /Create match — 100 grooopies/ }).click()
   expect(api.createBodies[0]).toMatchObject({ gameMode: 'ttmc', rounds: 7 })
   expect(api.createBodies[0].ttmcContentSlugs).toEqual(['included', 'ttmc-musique', 'ttmc-bonnebouffe'])
@@ -826,7 +841,7 @@ test('uses TTMC catalog round bounds and normalizes its default', async ({ page 
   await expect(topics).toHaveValue('8')
 })
 
-test('runs TTMC team turns sequentially without exposing answers before the authoritative result', async ({ page }) => {
+test('runs TTMC team turns sequentially without exposing answers before the authoritative result', async ({ page }, testInfo) => {
   await startTtmcMatch(page)
   const board = page.getByRole('region', { name: 'TTMC' })
   await expect(page.getByText('Up now', { exact: true })).toBeVisible()
@@ -836,6 +851,9 @@ test('runs TTMC team turns sequentially without exposing answers before the auth
   await page.getByRole('button', { name: 'Lock in 1 for Team A →' }).click()
   await expect(page.getByText('Is the secret switch on?', { exact: true })).toBeVisible()
   await expect(page.getByText('Team B, read this aloud.')).toBeVisible()
+  if (testInfo.project.name === 'desktop-chromium') {
+    await captureReadmeScreenshot(page, 'ttmc-live-desktop')
+  }
   if ((await page.viewportSize())?.width === 390) {
     const widths = await page.evaluate(() => ({
       viewport: document.documentElement.clientWidth,
@@ -1245,10 +1263,14 @@ test('reconnects after a malformed connection frame', async ({ page }) => {
   await expect(page.getByRole('spinbutton', { name: 'Team A answer' })).toBeEnabled()
 })
 
-test('shows a prominent countdown and adds the next question in the same match', async ({ page }) => {
+test('shows a prominent countdown and adds the next question in the same match', async ({ page }, testInfo) => {
   await startQuestion(page)
   const timer = page.getByRole('timer')
   await expect(timer).toContainText('Time left')
+  if (testInfo.project.name === 'iphone-chromium') {
+    await timer.scrollIntoViewIfNeeded()
+    await captureReadmeScreenshot(page, 'proximo-live-mobile')
+  }
   const first = await timer.locator('b').innerText()
   expect(first).toMatch(/^00:(29|30)$/)
   await page.waitForTimeout(1_100)

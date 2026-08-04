@@ -1,25 +1,72 @@
-# Grooop Client
+<div align="center">
+  <img src="public/icon.svg" width="104" alt="Grooop Client logo">
+  <h1>Grooop Client</h1>
+  <p><strong>One phone. Two teams. No mercy.</strong></p>
+  <p>A private game-night desk for running Proximo and TTMC with two Grooop accounts.</p>
+  <p>
+    <a href="https://github.com/mirsella/grooop-client/actions/workflows/ci.yml"><img src="https://github.com/mirsella/grooop-client/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
+    <img src="https://img.shields.io/badge/React-19-2a5bd7?logo=react&logoColor=white" alt="React 19">
+    <img src="https://img.shields.io/badge/Cloudflare-Workers-f48120?logo=cloudflare&logoColor=white" alt="Cloudflare Workers">
+    <img src="https://img.shields.io/badge/PWA-installable-ef3127" alt="Installable PWA">
+  </p>
+</div>
 
-Private, one-phone client for two Grooop accounts. It supports Proximo and
-TTMC: the browser manages two local teams while a Cloudflare Worker keeps each
-Grooop identity and party socket isolated on the server.
+<p align="center">
+  <img src="docs/screenshots/setup-desktop.png" alt="Grooop Client match setup on desktop" width="100%">
+</p>
+<p align="center"><sub>Build the teams, choose the game, get the exact price, and start from one screen.</sub></p>
 
-## Architecture
+## What it does
 
-- React/Vite installable PWA served by Workers Static Assets
-- Cloudflare Worker API protected by Cloudflare Access
-- D1 for encrypted account material, login challenges, matches, team presets,
-  and observed Proximo questions
-- One Durable Object per live match for the two outbound Grooop WebSockets
-- AES-256-GCM encryption for account identities and Grooop sessions; only
-  masked account data reaches the browser
+Grooop Client turns one phone into a control desk for two local teams. It keeps both Grooop identities on the server, joins them to the same paid party, and gives the person holding the phone a clear next action throughout the match.
 
-The browser never receives Grooop session tokens. API responses use no-store
-behavior for private data. The service worker caches only same-origin static
-assets, never `/api/`, and supports an offline application shell after one
-controlled online load.
+| | |
+|---|---|
+| **Proximo** | Timed number questions, private answer lock-in for each team, an authoritative reveal, and another question without creating another party. |
+| **TTMC** | Two ordered team turns per topic, difficulty choices from 1 to 10, five original question formats, scoring, and alternating first team. |
+| **One-phone flow** | Saved lineups, team presets, automatic pricing, live reconnection, match restoration, history, and cancellation. |
+| **Private by design** | Grooop sessions stay encrypted in D1. The browser receives masked identities and sanitized match state only. |
 
-## Local Development
+## The live desk
+
+<table>
+  <tr>
+    <td width="67%">
+      <img src="docs/screenshots/ttmc-live-desktop.png" alt="TTMC live turn showing the active team, reader handoff, and answer controls">
+    </td>
+    <td width="33%">
+      <img src="docs/screenshots/proximo-live-mobile.png" alt="Proximo question and countdown on a mobile phone">
+    </td>
+  </tr>
+  <tr>
+    <td align="center"><sub>TTMC makes the handoff explicit: who answers, who reads, and who waits.</sub></td>
+    <td align="center"><sub>Proximo keeps the question clock visible on mobile.</sub></td>
+  </tr>
+</table>
+
+The visual language is intentionally loud: newsprint, primary colors, hard borders, oversized type. It should feel like something on the table during game night, not an admin dashboard.
+
+## Why the Worker exists
+
+The browser never sees a Grooop session token or party code. A Cloudflare Worker owns authentication and paid match creation. A Durable Object owns the two upstream party sockets and serializes every live mutation.
+
+```mermaid
+flowchart LR
+    Phone[One-phone PWA] -->|Access JWT + public commands| Worker[Cloudflare Worker]
+    Worker --> D1[(D1)]
+    Worker --> Room[Match Durable Object]
+    Room -->|host session| Host[Grooop socket A]
+    Room -->|guest session| Guest[Grooop socket B]
+    D1 -->|encrypted sessions| Room
+```
+
+- React 19 and Vite serve an installable responsive PWA.
+- Cloudflare Access protects every static and API request. The Worker verifies the JWT again.
+- D1 stores encrypted account material, match records, presets, challenges, and observed questions.
+- One Durable Object per match owns synchronization, deadlines, mutation markers, reconnects, and the terminal snapshot.
+- The service worker caches the application shell but never caches `/api/` responses.
+
+## Run it locally
 
 Requirements: Node.js, pnpm 11, and a Cloudflare account.
 
@@ -29,7 +76,9 @@ pnpm exec wrangler d1 migrations apply grooop-party-pwa --local
 pnpm dev:worker
 ```
 
-## Verification
+The project intentionally denies Vite access to `.creds`, `.wrangler`, Git metadata, and environment files. Keep browser states, D1 exports, and Grooop credentials outside the repository.
+
+## Test it
 
 ```bash
 pnpm typecheck
@@ -40,36 +89,14 @@ pnpm build
 pnpm test:e2e
 ```
 
-Unit tests cover Access JWT validation, encryption, validation, redacted error
-handling, the shared-state reducer, party sockets, reconnect and room
-idempotency, and sanitized production Proximo and TTMC protocol replays.
-Worker tests use real local D1 migrations with a deterministic mocked Grooop
-boundary for account, preset, history, mode-specific quote and paid-create,
-join, origin, and idempotency flows.
+The test stack covers the boundaries separately:
 
-The default Playwright matrix runs desktop Chromium plus Pixel 7 and iPhone 15
-touch layouts on Chromium. It tests quote retry idempotency, account
-re-authentication, team presets, live-match restoration after reload, the
-visible countdown, all-category selection, one-click dual-team lock-in,
-TTMC setup, pre-reveal answer secrecy, next-topic behavior, question history,
-service-worker cache boundaries, responsive overflow, and the absence of
-browser-stored session material. Normal CI is fully mocked and cannot spend
-Grooopies.
+- Unit tests replay sanitized production traffic and exercise party sockets, shared state, Durable Object recovery, deadlines, terminal fencing, TTMC schemas, and mutation idempotency.
+- Worker tests apply the real migration chain to local D1 and cover Access, encrypted accounts, quotes, paid creation, joining, cancellation, purchases, and concurrency.
+- Playwright runs desktop Chrome plus Pixel 7 and iPhone 15 layouts. Its API and socket boundary is deterministic, so normal CI cannot spend Grooopies.
+- Production tests are serial and opt-in. They require a manually authenticated Access browser state stored outside the repository with mode `0600`.
 
-True WebKit is opt-in for a compatible Ubuntu CI runner:
-
-```bash
-PLAYWRIGHT_WEBKIT=1 pnpm test:e2e
-```
-
-Playwright's Ubuntu WebKit binary is not ABI-compatible with this project's
-Arch Linux development host.
-
-Production tests are separate, serial, and never run in CI. First save a
-manually authenticated Cloudflare Access browser state at an absolute path
-outside the repository with mode `0600`. The live configuration enforces those
-conditions, accepts only the production HTTPS origin, and disables Playwright
-traces so Access cookies cannot be retained. Read-only verification requires:
+Read-only production check:
 
 ```bash
 LIVE_BASE_URL=https://grooop-party-pwa.mirsella.workers.dev \
@@ -77,221 +104,116 @@ LIVE_STORAGE_STATE=/absolute/path/to/access-state.json \
   pnpm test:live
 ```
 
-The paid test is skipped unless spending is authorized twice: an explicit flag
-and a positive hard cap. It requotes immediately and refuses a cost above that
-cap:
+Paid production check, guarded by both an explicit flag and a hard price cap:
 
 ```bash
 LIVE_BASE_URL=https://grooop-party-pwa.mirsella.workers.dev \
 LIVE_STORAGE_STATE=/absolute/path/to/access-state.json \
-LIVE_ALLOW_SPEND=1 LIVE_SPEND_CAP=100 pnpm test:live
+LIVE_ALLOW_SPEND=1 LIVE_SPEND_CAP=100 \
+  pnpm test:live
 ```
 
-## Cloudflare Deployment
+The app has also been exercised manually against paid production parties. Complete Proximo and TTMC games, follow-up questions, reconnects, finish projection, and cancellation have all been tested with real upstream state. Paid TTMC runs produced multiple-choice, numeric, one-word, and ordered-word questions; the boolean contract comes from a sanitized production capture and the original client schema.
 
-The dedicated D1 database, Durable Object namespace, Access application, and
-encryption configuration are configured in the Proton-owned Cloudflare account:
+## Deploy it
+
+The production deployment is private behind Cloudflare Access:
 
 ```text
 https://grooop-party-pwa.mirsella.workers.dev
 ```
 
-`pnpm deploy` builds the application, applies pending remote D1 migrations, and
-only then deploys the Worker:
+`pnpm deploy` builds the PWA, applies pending remote D1 migrations, and deploys the Worker in that order.
 
 ```bash
 pnpm deploy
 ```
 
-The self-hosted Access application protects the exact `workers.dev` hostname.
-Its Allow policy contains only the configured owner identity, requires the
-configured identity provider, and lasts eight hours. Preview URLs are disabled.
-Unauthenticated requests to both `/` and `/api/health` redirect to Access. The
-Worker then independently verifies the Access JWT signature, issuer, audience,
-subject, and configured owner identity for both static and API requests.
+Preview URLs are disabled. Production fails closed if the encryption key, key version, or Access configuration is missing. The authenticated health route also checks the current match schema.
 
-All static and API requests run through the Worker. Static responses include a
-frame-denying CSP, `X-Frame-Options: DENY`, no-sniff, no-referrer, and restrictive
-Permissions Policy headers. Production returns 503 for every route while the
-encryption configuration, key version, or either Access value is invalid. The
-authenticated health route also verifies that the latest match schema exists.
+## How matches stay safe
 
-Verify each deployment in a private browser window before adding or using
-Grooop accounts:
+<details>
+<summary><strong>Paid creation and recovery</strong></summary>
 
-1. Unauthenticated navigation is denied by Access.
-2. The owner identity can load the PWA and `/api/health`.
-3. Another identity cannot load either the static application or API.
-4. Account Settings exposes only masked account identities.
+The browser prices every valid setup automatically. Creating the match still requires one explicit click on a button that includes the exact cost.
 
-## Account And Match Flow
+Before it calls Grooop's paid endpoint, the Worker claims a unique idempotency key and canonical request fingerprint in D1. A retry with the same request returns the existing match instead of creating another party. Party metadata is persisted before the guest joins, so a joining match can resume after a reload without repeating the paid call.
 
-Settings verifies a Grooop login challenge and requires `/user/retrieve` to
-return a real user before storing the encrypted session. Refresh revalidates
-identity. Re-authentication does not expose the stored account identity to the
-browser. Removal is blocked during an active match and intentionally rejected
-when match history still references the account, rather than failing at a
-database foreign key. Settings also saves, applies, updates, and deletes named
-team-roster presets.
+Grooop has no create idempotency key and no lookup by the client's request ID. If the paid request has an unknown transport outcome, the app records `party-create-outcome-unknown` and blocks another paid creation. It does not guess and risk charging twice.
 
-Creating a match refreshes both selected accounts, obtains a mode-specific
-server quote, and requires confirmation of that exact cost. Proximo creation
-selects a content pack and duration. TTMC creation loads the host's currently
-available packs, selects all of them by default, and selects two to ten rounds.
-An All packs shortcut restores the complete selection after a custom choice.
-The setup catalog is the host's sanitized live party parameters; it contains
-only TTMC ownership and available pack titles/slugs. Refreshes preserve every
-still-available selection. Each mode uses the corresponding upstream parameters
-and paid-create payload. A quote retains the exact setup it priced, and a
-unique idempotency key is claimed before spending; browser retries return the
-same match and cannot call `party/create` again. The host creates one two-player
-party and the guest joins it. Party metadata is persisted immediately after
-creation. Join or relay initialization failures remain recoverable and never
-automatically repeat paid party creation. A persisted `joining` match can be
-resumed by match ID after reload without the original browser idempotency key;
-this only retries guest query/join and room initialization, never `party/create`.
-The socket route also idempotently binds its Durable Object before every browser
-upgrade.
+</details>
 
-Grooop exposes neither create idempotency nor a party lookup by client request
-ID. A transport failure during the paid `party/create` call therefore has an
-irreducibly unknown outcome. The app records `party-create-outcome-unknown`,
-blocks every new paid match, and requires manual operator reconciliation rather
-than risking a second charge.
+<details>
+<summary><strong>Proximo flow</strong></summary>
 
-On page load the PWA retrieves the authenticated match list and automatically
-reopens the newest live match. The match ID is rediscovered from the API; no
-Grooop credential or live state is stored in browser storage. The Durable Object
-reconnects and resynchronizes both upstream accounts. Every new upstream socket
-reads the account's current encrypted session from D1, so a successful
-re-authentication is used on the next reconnect. Persisted per-action markers
-make retries safe: an already accepted action is reused, and an uncertain
-upstream outcome is reconciled from synchronized state or left blocked rather
-than repeated. The browser keeps only one command in flight; synchronized room
-state remains the sole authority after acknowledgements and reconnects.
+The room adds a Proximo game only after the upstream party is running. Once the new game appears in synchronized state, both controlled accounts become ready. A conservative question start timestamp is persisted before the ready mutations, so a Durable Object restart cannot grant a fresh timer.
 
-Proximo can use one granted category or `all`, which sends all four granted
-content slugs: `300`, `299`, `geographie`, and `sciences`. The live room adds
-Proximo only after the upstream party is running, then maps Team A and Team B
-answers to their corresponding accounts. Both accounts become ready together;
-production validation proved the second successful `ready` automatically
-starts round 0, so normal play does not send `force-start`.
+Each team can lock a complete answer privately. The room submits account-specific answers and records per-player mutation markers. Official answers and score changes stay hidden until synchronized state sets `showAnswer: true`. Starting the next question adds another Proximo game to the same party.
 
-When the continuously connected room first observes a new question, it persists a deadline in
-Durable Object storage from the server-provided question duration. The browser
-renders that deadline as a prominent `MM:SS` countdown, including urgent and
-expired states. Browser reloads and room reconnections do not restart it.
-If an active question is first discovered during reconnection without a stored
-deadline, answering fails closed rather than granting a fresh window. Grooop's
-reveal remains authoritative because the observed protocol does not include an
-absolute server start timestamp.
+</details>
 
-The browser can privately lock either complete team answer before handing the
-phone over; it sends only complete, unresolved sides. The room submits batched
-account-specific requests concurrently and retains its
-per-player, per-round deduplication, so a retry cannot intentionally submit the
-same answer twice. Partial success remains recoverable: after reload, only the
-unresolved team's answer is sent. Official answers, score details, and the
-next-question control remain hidden until authoritative `showAnswer: true`; a
-mere `finished` label or early score delta is insufficient. After reveal, `Next
-question` follows the official-client model:
-it adds a new Proximo game to the same running party while retaining completed
-games in party history; it does not reuse the finished game or call
-`finish-current-game`. Revealed questions are stored once by content fingerprint
-and can be reviewed in History. The room verifies both expected Grooop user IDs,
-reconnects and fully resynchronizes upstream sockets, and deduplicates
-ready/answer actions across retries.
+<details>
+<summary><strong>TTMC flow</strong></summary>
 
-TTMC sends the persisted pack selection as upstream `selectedContents`; the
-canonical sorted selection is part of the paid request's idempotency identity.
-TTMC begins when the host starts the first topic. On the same phone, each team
-independently selects difficulty 1–10, receives its own question, and
-submits its own answer. After a finished round, `Next topic` creates the next
-round; after the configured final round, the upstream party completes
-automatically. Supported TTMC answer types are yes/no, multiple-choice,
-word-order, one-word text, and bounded numeric input. The browser receives only
-the public prompt and answer controls for each team. Correct answers, success,
-and points remain hidden until the authoritative finished round; raw question
-data stays in Durable Object storage.
+The host starts the first topic. Team A answers first on odd topics and Team B answers first on even topics. The Durable Object enforces this order, not just the interface.
 
-A live match in waiting, playing, or revealed state can be cancelled from
-History. Grooop does not let the game master leave an IRL party, so cancellation
-uses the controlled guest's official `give-up` command. If the party has not
-started, the room first performs the normal idempotent game bootstrap required
-by Grooop. The local match is cancelled only after Grooop confirms the leave.
-Its terminal snapshot is persisted before D1 projection so a database retry
-never sends `give-up` twice.
+Each team chooses its own difficulty and receives its own question for the shared topic. Supported formats match the original client: yes/no, multiple choice, ordered words, one-word text, and bounded numbers. Pending answers do not advance the other team. Only an accepted answer or authoritative played state does.
 
-Before finalizing a match in D1, the room stores its sanitized terminal snapshot
-in Durable Object storage. A Durable Object alarm retries a failed terminal D1
-projection across process eviction, and a restarted room can serve the final
-state read-only without reconnecting to the finished upstream party.
+Raw correct answers stay in Durable Object storage. The browser receives the prompt and controls first, then the result after the whole topic is authoritatively finished.
 
-Production also proved that the Proximo game object lives in application 0's
-dereferenced `games` list while per-player scores live in application
-`<gameId>`. Answer requests return an object containing the official answer and
-delta; the room intentionally normalizes that transport reply to `accepted`
-and exposes results only from synchronized reveal state. Score updates call the
-answer gap `answerDelta`. The UI presents it as a gap, not as awarded points.
-`finish-current-game` cannot reset a party for another Proximo game. During the
-first discovery it transitioned the party to finished; after an already
-finished Proximo round it returned `no-running-game`, so the local match closes
-and the upstream party expires normally rather than being probed with an
-unverified cancel endpoint.
+</details>
 
-Sanitized, credential-free Proximo and TTMC production fixtures are replayed in
-the unit suite. The Proximo fixture covers dual sockets, party/game creation,
-both ready actions, automatic question start, both answers, scoring, reveal,
-and completion. The TTMC fixture covers the two-account flow, independently
-started team questions, recovery requests, completed rounds, and automatic final
-party completion. It observes boolean, selection-array, and text answers.
-Numeric TTMC support is implemented from the decompiled official-client schema,
-not observed in this capture. Correlations, entity references, player IDs, and
-identity fields are pseudonymized; live rooms do not retain protocol traffic.
+<details>
+<summary><strong>Cancellation and terminal state</strong></summary>
 
-## Operations
+Grooop does not let the game master leave an IRL party, so cancellation uses the controlled guest's official `give-up` command. An empty waiting party is bootstrapped first because the upstream command rejects a guest leave before a game or round exists.
 
-Back up D1 before schema or encryption-key changes using Cloudflare's D1 export
-facility, and keep the export outside the repository with restrictive file
-permissions. Apply every pending migration before deploying the Worker that
-depends on it. The current schema stores only mode-native match settings:
-Proximo rows have content and duration, while TTMC rows have a round count and
-the selected content-pack array. TTMC matches created before pack selection was
-introduced are migrated to the standard `included` pack.
+The room stores a sanitized terminal snapshot before projecting `finished` or `cancelled` to D1. Live D1 updates use guarded transitions and cannot overwrite a terminal row. If projection fails, a Durable Object alarm retries it without repeating the upstream action.
 
-Extension purchases are claimed in D1 before the upstream mutation. Their
-idempotency fingerprint includes the account, product, and expected price;
-concurrent requests with the same key converge on that one claim, while a
-different key cannot claim an active product. Ambiguous outcomes remain blocked
-until ownership can be reconciled read-only.
+Natural completion waits for both sockets and complete mode-specific results. A partial final frame cannot freeze an incomplete score or answer into the terminal snapshot.
 
-The Worker runs the ad-reward claim once daily at 06:00 UTC. Accounts are
-isolated and processed concurrently; each account's ads remain sequential with
-the upstream-required 20-second wait. A finish request is never retried because
-its outcome may be ambiguous. Grooop authorization failures mark only that
-account as requiring reauthentication.
+</details>
 
-## Current Limitations
+<details>
+<summary><strong>Security boundaries</strong></summary>
 
-- Proximo and TTMC have fixture-backed two-account evidence and replay coverage.
-  The separately guarded paid live test currently completes a Proximo round;
-  TTMC has not yet been exercised by that live test.
-- Selecting all four Proximo categories and adding another Proximo game after a
-  reveal are both behaviors recovered from the official client. The local
-  deterministic suite covers them, but those exact two requests have not yet
-  been captured in a production party.
-- The opt-in paid live test remains separately guarded because every invocation
-  creates a newly charged party. Preserve only sanitized protocol fixtures;
-  never retain credentials.
-- There is no supported bulk question endpoint. Questions are observed during
-  normal authorized games and deduplicated after reveal.
-- Deploying or restarting the Worker disconnects outbound Grooop sockets. The
-  room reconnects and performs a full shared-state sync while a browser remains
-  attached.
-- Grooop provides a question duration but no verified absolute question start.
-  There is no verified request that configures per-question answer time.
-  Proximo's party duration is the whole match duration, and TTMC's round setting
-  is a topic count. Server reveal remains authoritative.
-- Ad rewards run on the daily schedule above. Match creation uses Grooop's paid
-  party endpoint only after an explicit quote and confirmation; retries remain
-  protected by persisted idempotency state.
+Account email and session material use AES-256-GCM with random nonces. API responses are private and carry `Cache-Control: no-store`. Static responses include a frame-denying CSP, `X-Frame-Options: DENY`, no-sniff, no-referrer, and a restrictive Permissions Policy.
+
+Same-origin checks protect mutations and browser WebSocket upgrades. The outer Worker checks Cloudflare Access before routing static files, APIs, or match sockets. Reauthentication updates are generation-aware, so a delayed rejection from an old session cannot invalidate a newer session.
+
+</details>
+
+## Project map
+
+```text
+src/                 React PWA and API client
+worker/              Worker routes, Grooop boundary, and MatchRoom
+migrations/          Ordered D1 schema migrations
+tests/unit/          Protocol, crypto, reducer, and Durable Object tests
+tests/worker/        Worker integration tests on local D1
+tests/e2e/           Browser flows and responsive layouts
+tests/live/          Explicitly guarded production checks
+docs/screenshots/    Deterministic, credential-free README captures
+```
+
+Regenerate the README screenshots from mocked app state:
+
+```bash
+CAPTURE_README_SCREENSHOTS=1 pnpm exec playwright test \
+  --project=desktop-chromium \
+  --grep "selects TTMC packs|runs TTMC team turns"
+
+CAPTURE_README_SCREENSHOTS=1 pnpm exec playwright test \
+  --project=iphone-chromium \
+  --grep "shows a prominent countdown"
+```
+
+## Known limits
+
+- This is a private single-owner deployment, not a general hosted service.
+- An unknown paid-create outcome requires operator reconciliation because retrying could charge again.
+- There is no supported bulk question endpoint. The archive grows from questions observed during normal games.
+- Deploying the Worker disconnects upstream sockets. Live rooms reconnect and perform a full synchronization.
+- Account and match history currently prevent deleting referenced accounts.
+- The production URL requires the configured Cloudflare Access identity.
