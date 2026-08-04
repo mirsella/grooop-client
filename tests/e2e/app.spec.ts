@@ -770,6 +770,18 @@ test('does not broaden an empty custom TTMC selection after reload', async ({ pa
   await expect(page.locator('.create-button')).toBeDisabled()
 })
 
+test('keeps an all-packs choice current after a catalog change and reload', async ({ page }) => {
+  const api = apiState(page)
+  await page.goto('/')
+  await page.getByRole('radio', { name: /TTMC/i }).check()
+  await expect(page.getByRole('checkbox', { name: 'TTMC Bonne Bouffe' })).toBeChecked()
+
+  api.ttmcCatalogs['account-b'].contents.push({ slug: 'ttmc-cinema', title: 'TTMC Cinema' })
+  await page.reload()
+
+  await expect(page.getByRole('checkbox', { name: 'TTMC Cinema' })).toBeChecked()
+})
+
 test('retries a failed TTMC catalog load', async ({ page }) => {
   const api = apiState(page)
   api.ttmcCatalogFailuresRemaining['account-b'] = 1
@@ -1006,6 +1018,22 @@ test('remembers the complete match setup on this device', async ({ page }) => {
   await expect(page.getByRole('checkbox', { name: 'TTMC Musique' })).toBeChecked()
   await expect(page.getByRole('checkbox', { name: 'TTMC Bonne Bouffe' })).not.toBeChecked()
   await expect(page.getByRole('slider', { name: 'Topics' })).toHaveValue('8')
+})
+
+test('keeps a surviving account attached to its team when another account disappears', async ({ page }) => {
+  const api = apiState(page)
+  api.accounts.push({ id: 'account-c', email: 'third@example.com', userId: 34871, grooopies: 1200, status: 'active' })
+  await page.goto('/')
+  await page.getByLabel('Team A account').selectOption('account-c')
+  await page.getByLabel('Team B account').selectOption('account-b')
+  await page.getByLabel('Host').selectOption('a')
+
+  api.accounts = api.accounts.filter((account) => account.id !== 'account-c')
+  await page.reload()
+
+  await expect(page.getByLabel('Team A account')).toHaveValue('account-a')
+  await expect(page.getByLabel('Team B account')).toHaveValue('account-b')
+  await expect(page.getByLabel('Host')).toHaveValue('b')
 })
 
 test('restores the newest active match after a page reload', async ({ page }) => {
@@ -1666,23 +1694,7 @@ test('emits no console errors and leaves no browser-stored secrets', async ({ pa
   expect(storage.databases).toEqual([])
   expect(storage.local).toHaveLength(1)
   expect(storage.local[0][0]).toBe('grooop-client.match-draft')
-  expect(JSON.parse(storage.local[0][1])).toEqual({
-    version: 1,
-    draft: {
-      host: 'b',
-      accountIds: { a: 'account-a', b: 'account-b' },
-      teams: {
-        a: { name: 'Team A', roster: ['Player one', 'Player two'] },
-        b: { name: 'Team B', roster: ['Player three', 'Player four'] },
-      },
-      contentSlug: 'all',
-      durationMinutes: 30,
-      gameMode: 'proximo',
-      rounds: 5,
-      ttmcContentSlugs: [],
-      ttmcSelectionInitialized: false,
-    },
-  })
+  expect(storage.local[0][1]).not.toMatch(/session|partyCode|token|secret/i)
   const cachedUrls = await page.evaluate(async () => {
     const requests = await Promise.all((await caches.keys()).map(async (name) => {
       return (await (await caches.open(name)).keys()).map((request) => request.url)

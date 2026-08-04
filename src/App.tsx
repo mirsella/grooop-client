@@ -47,6 +47,7 @@ import "./App.css";
 type Tab = "play" | "match" | "history" | "settings";
 type Side = "a" | "b";
 type ContentSlug = "all" | "300" | "299" | "geographie" | "sciences";
+type TtmcSelection = { slugs: string[]; all: boolean };
 type Draft = {
   host: Side;
   accountIds: Record<Side, string>;
@@ -55,8 +56,7 @@ type Draft = {
   durationMinutes: number;
   gameMode: GameMode;
   rounds: number;
-  ttmcContentSlugs: string[];
-  ttmcSelectionInitialized: boolean;
+  ttmcSelections: Record<string, TtmcSelection>;
 };
 type RosterChange =
   | { type: "set"; index: number; value: string }
@@ -97,8 +97,6 @@ type TtmcCatalogResource =
   | { status: "loading"; hostAccountId: string }
   | { status: "ready"; hostAccountId: string; data: TtmcCatalog }
   | { status: "error"; hostAccountId: string; message: string };
-type TtmcSelection = { slugs: string[]; all: boolean };
-
 const sides: Side[] = ["a", "b"];
 const draftStorageKey = "grooop-client.match-draft";
 const initialDraft: Draft = {
@@ -112,8 +110,7 @@ const initialDraft: Draft = {
   durationMinutes: 30,
   gameMode: "proximo",
   rounds: 5,
-  ttmcContentSlugs: [],
-  ttmcSelectionInitialized: false,
+  ttmcSelections: {},
 };
 const content: ReadonlyArray<readonly [ContentSlug, string, string]> = [
   ["all", "All", "All four categories, shuffled together"],
@@ -123,27 +120,21 @@ const content: ReadonlyArray<readonly [ContentSlug, string, string]> = [
   ["sciences", "Sciences", "Experiments, nature & why"],
 ];
 
-function isStoredTeam(value: unknown): value is Draft["teams"][Side] {
-  if (
-    !isRecord(value) ||
-    typeof value.name !== "string" ||
-    value.name.length > 40
-  )
-    return false;
-  return (
-    Array.isArray(value.roster) &&
-    value.roster.length >= 1 &&
-    value.roster.length <= 12 &&
-    value.roster.every(
-      (player) => typeof player === "string" && player.length <= 40,
-    )
-  );
-}
-
 function isStoredDraft(value: unknown): value is Draft {
   if (!isRecord(value)) return false;
-  const accountIds = value.accountIds;
-  const teams = value.teams;
+  const { accountIds, teams, ttmcSelections } = value;
+  const validTeam = (team: unknown) =>
+    isRecord(team) &&
+    typeof team.name === "string" && team.name.length <= 40 &&
+    Array.isArray(team.roster) && team.roster.length >= 1 && team.roster.length <= 12 &&
+    team.roster.every((player) => typeof player === "string" && player.length <= 40);
+  const validSelection = ([accountId, selection]: [string, unknown]) => {
+    if (!accountId || accountId.length > 128 || !isRecord(selection) ||
+      typeof selection.all !== "boolean" || !Array.isArray(selection.slugs) ||
+      selection.slugs.length > 32 ||
+      !selection.slugs.every((slug) => typeof slug === "string" && slug.length <= 80)) return false;
+    return new Set(selection.slugs).size === selection.slugs.length;
+  };
   return (
     (value.host === "a" || value.host === "b") &&
     isRecord(accountIds) &&
@@ -152,39 +143,30 @@ function isStoredDraft(value: unknown): value is Draft {
     typeof accountIds.b === "string" &&
     accountIds.b.length <= 128 &&
     isRecord(teams) &&
-    isStoredTeam(teams.a) &&
-    isStoredTeam(teams.b) &&
+    validTeam(teams.a) &&
+    validTeam(teams.b) &&
     content.some(([slug]) => slug === value.contentSlug) &&
     [15, 30, 45].includes(value.durationMinutes as number) &&
     (value.gameMode === "proximo" || value.gameMode === "ttmc") &&
     Number.isInteger(value.rounds) &&
     (value.rounds as number) >= 2 &&
     (value.rounds as number) <= 10 &&
-    Array.isArray(value.ttmcContentSlugs) &&
-    value.ttmcContentSlugs.length <= 100 &&
-    value.ttmcContentSlugs.every(
-      (slug) => typeof slug === "string" && slug.length <= 128,
-    ) &&
-    typeof value.ttmcSelectionInitialized === "boolean"
+    isRecord(ttmcSelections) &&
+    Object.entries(ttmcSelections).every(validSelection)
   );
 }
 
-function loadStoredDraft(): { draft: Draft; restored: boolean } {
+function loadStoredDraft(): Draft {
   try {
     const stored = localStorage.getItem(draftStorageKey);
-    if (stored === null) return { draft: initialDraft, restored: false };
+    if (stored === null) return initialDraft;
     const payload: unknown = JSON.parse(stored);
-    if (
-      isRecord(payload) &&
-      payload.version === 1 &&
-      isStoredDraft(payload.draft)
-    )
-      return { draft: payload.draft, restored: true };
+    if (isStoredDraft(payload)) return payload;
     console.warn("Ignoring invalid saved match setup.");
   } catch (error) {
     console.warn("Could not load the saved match setup.", error);
   }
-  return { draft: initialDraft, restored: false };
+  return initialDraft;
 }
 
 function cleanTeam(team: Draft["teams"][Side]) {
@@ -709,20 +691,7 @@ function useLiveMatch(
 
 function App() {
   const [tab, setTab] = useState<Tab>("play");
-  const restoredTtmcSelection = useRef<{
-    hostAccountId: string;
-    slugs: string[];
-  } | null>(null);
-  const [draft, setDraft] = useState(() => {
-    const stored = loadStoredDraft();
-    if (stored.restored && stored.draft.ttmcSelectionInitialized) {
-      restoredTtmcSelection.current = {
-        hostAccountId: stored.draft.accountIds[stored.draft.host],
-        slugs: stored.draft.ttmcContentSlugs,
-      };
-    }
-    return stored.draft;
-  });
+  const [draft, setDraft] = useState(loadStoredDraft);
   const [quote, setQuote] = useState<
     (MatchQuote & { idempotencyKey: string; setup: MatchSetup }) | null
   >(null);
@@ -745,7 +714,6 @@ function App() {
   const [accounts, setAccounts] = useState<Account[] | null>(null);
   const [ttmcCatalog, setTtmcCatalog] = useState<TtmcCatalogResource>({ status: "idle" });
   const [ttmcCatalogRefresh, setTtmcCatalogRefresh] = useState(0);
-  const ttmcSelections = useRef(new Map<string, TtmcSelection>());
   const [loadingAccounts, setLoadingAccounts] = useState(true);
   const [accountError, setAccountError] = useState("");
   const [email, setEmail] = useState("");
@@ -839,7 +807,7 @@ function App() {
     try {
       localStorage.setItem(
         draftStorageKey,
-        JSON.stringify({ version: 1, draft }),
+        JSON.stringify(draft),
       );
     } catch (error) {
       console.warn("Could not save the match setup.", error);
@@ -856,23 +824,19 @@ function App() {
       const active = loaded.filter(isActive);
       setAccounts(loaded);
       editDraft((current) => {
-        const assignmentsValid =
-          current.accountIds.a !== current.accountIds.b &&
-          active.some((account) => account.id === current.accountIds.a) &&
-          active.some((account) => account.id === current.accountIds.b);
-        const a = active.some((account) => account.id === current.accountIds.a)
-          ? current.accountIds.a
-          : (active[0]?.id ?? "");
-        const b =
-          active.some((account) => account.id === current.accountIds.b) &&
-          current.accountIds.b !== a
-            ? current.accountIds.b
-            : (active.find((account) => account.id !== a)?.id ?? "");
+        const valid = (id: string) => active.some((account) => account.id === id);
+        let a = valid(current.accountIds.a) ? current.accountIds.a : "";
+        let b = valid(current.accountIds.b) ? current.accountIds.b : "";
+        if (a === b) b = "";
+        if (!a) a = active.find((account) => account.id !== b)?.id ?? "";
+        if (!b) b = active.find((account) => account.id !== a)?.id ?? "";
         const accountIds = { a, b };
+        const assignmentsUnchanged =
+          a === current.accountIds.a && b === current.accountIds.b;
         return {
           ...current,
           accountIds,
-          host: assignmentsValid
+          host: assignmentsUnchanged
             ? current.host
             : lowestBalanceSide(accountIds, active, current.host),
         };
@@ -909,8 +873,7 @@ function App() {
     gameMode: draft.gameMode,
     hostAccountId: draft.accountIds[draft.host],
     rounds: draft.rounds,
-    slugs: draft.ttmcContentSlugs,
-    initialized: draft.ttmcSelectionInitialized,
+    selection: draft.ttmcSelections[draft.accountIds[draft.host]],
   }));
   useEffect(() => {
     if (draft.gameMode !== "ttmc" || !ttmcHostAccountId) {
@@ -924,25 +887,14 @@ function App() {
         if (controller.signal.aborted) return;
         setTtmcCatalog({ status: "ready", hostAccountId: ttmcHostAccountId, data: catalog });
         const available = catalog.contents.map((item) => item.slug);
-        const previous = ttmcSelections.current.get(ttmcHostAccountId);
-        const restored = restoredTtmcSelection.current;
+        const currentSetup = currentTtmcSetup();
+        const previous = currentSetup.selection;
         const selected = previous?.all
           ? available
           : previous
             ? previous.slugs.filter((slug) => available.includes(slug))
-            : restored?.hostAccountId === ttmcHostAccountId
-              ? restored.slugs.filter((slug) => available.includes(slug))
-              : available;
-        if (restored?.hostAccountId === ttmcHostAccountId)
-          restoredTtmcSelection.current = null;
-        const all =
-          selected.length === available.length &&
-          available.every((slug) => selected.includes(slug));
-        ttmcSelections.current.set(ttmcHostAccountId, {
-          slugs: selected,
-          all,
-        });
-        const currentSetup = currentTtmcSetup();
+            : available;
+        const selection = { slugs: selected, all: previous?.all ?? true };
         const rounds = catalog.rounds;
         const roundsValid =
           currentSetup.rounds >= rounds.min &&
@@ -951,17 +903,19 @@ function App() {
         if (
           currentSetup.gameMode !== "ttmc" ||
           currentSetup.hostAccountId !== ttmcHostAccountId ||
-          (selected.length === currentSetup.slugs.length &&
-            selected.every((slug, index) => slug === currentSetup.slugs[index]) &&
-            roundsValid &&
-            currentSetup.initialized)
+          (currentSetup.selection?.all === selection.all &&
+            selected.length === currentSetup.selection.slugs.length &&
+            selected.every((slug, index) => slug === currentSetup.selection?.slugs[index]) &&
+            roundsValid)
         ) return;
         editDraft((current) => {
           if (current.gameMode !== "ttmc" || current.accountIds[current.host] !== ttmcHostAccountId) return current;
           return {
             ...current,
-            ttmcContentSlugs: selected,
-            ttmcSelectionInitialized: true,
+            ttmcSelections: {
+              ...current.ttmcSelections,
+              [ttmcHostAccountId]: selection,
+            },
             rounds: roundsValid ? current.rounds : rounds.default,
           };
         });
@@ -1063,6 +1017,8 @@ function App() {
     teamA: cleanedTeams.a,
     teamB: cleanedTeams.b,
   };
+  const ttmcSelection = draft.ttmcSelections[ttmcHostAccountId];
+  const ttmcContentSlugs = ttmcSelection?.slugs ?? [];
   const setup: MatchSetup =
     draft.gameMode === "proximo"
       ? {
@@ -1075,7 +1031,7 @@ function App() {
           ...sharedSetup,
           gameMode: "ttmc",
           rounds: draft.rounds,
-          ttmcContentSlugs: draft.ttmcContentSlugs,
+          ttmcContentSlugs,
         };
   const readyTtmcCatalog =
     ttmcCatalog.status === "ready" &&
@@ -1099,15 +1055,15 @@ function App() {
     draft.rounds <= ttmcRounds.max &&
     (draft.rounds - ttmcRounds.min) % ttmcRounds.step === 0;
   const ttmcSelectionValid =
-    draft.ttmcContentSlugs.length > 0 &&
-    draft.ttmcContentSlugs.every((slug) =>
+    ttmcContentSlugs.length > 0 &&
+    ttmcContentSlugs.every((slug) =>
       ttmcContents.some((content) => content.slug === slug),
     );
   const allTtmcContentsSelected =
     ttmcContents.length > 0 &&
-    draft.ttmcContentSlugs.length === ttmcContents.length &&
-    ttmcContents.every((content) => draft.ttmcContentSlugs.includes(content.slug));
-  const ttmcContentSummary = draft.ttmcContentSlugs
+    ttmcContentSlugs.length === ttmcContents.length &&
+    ttmcContents.every((content) => ttmcContentSlugs.includes(content.slug));
+  const ttmcContentSummary = ttmcContentSlugs
     .map((slug) => ttmcContents.find((content) => content.slug === slug))
     .filter((content): content is TtmcCatalog["contents"][number] => Boolean(content))
     .map((content) => `${content.title} (${content.slug})`)
@@ -1325,31 +1281,34 @@ function App() {
 
   function toggleTtmcContent(slug: string) {
     editDraft((current) => {
-      const selected = current.ttmcContentSlugs.includes(slug)
-        ? current.ttmcContentSlugs.filter((item) => item !== slug)
-        : [...current.ttmcContentSlugs, slug];
+      const currentSlugs = current.ttmcSelections[ttmcHostAccountId]?.slugs ?? [];
+      const selected = currentSlugs.includes(slug)
+        ? currentSlugs.filter((item) => item !== slug)
+        : [...currentSlugs, slug];
       const ordered = ttmcContents
         .map((content) => content.slug)
         .filter((contentSlug) => selected.includes(contentSlug));
-      ttmcSelections.current.set(ttmcHostAccountId, {
-        slugs: ordered,
-        all: ordered.length === ttmcContents.length,
-      });
       return {
         ...current,
-        ttmcContentSlugs: ordered,
-        ttmcSelectionInitialized: true,
+        ttmcSelections: {
+          ...current.ttmcSelections,
+          [ttmcHostAccountId]: {
+            slugs: ordered,
+            all: ordered.length === ttmcContents.length,
+          },
+        },
       };
     });
   }
 
   function selectAllTtmcContents() {
     const slugs = ttmcContents.map((content) => content.slug);
-    ttmcSelections.current.set(ttmcHostAccountId, { slugs, all: true });
     editDraft((current) => ({
       ...current,
-      ttmcContentSlugs: slugs,
-      ttmcSelectionInitialized: true,
+      ttmcSelections: {
+        ...current.ttmcSelections,
+        [ttmcHostAccountId]: { slugs, all: true },
+      },
     }));
   }
 
@@ -2157,7 +2116,7 @@ function App() {
                             {ttmcOwned && ttmcContents.length > 0 && !ttmcSelectionValid && <p className="api-error" role="alert">Select at least one TTMC pack to price this match.</p>}
                            <div className="pack-options">
                              {ttmcContents.map((content) => {
-                               const checked = draft.ttmcContentSlugs.includes(content.slug);
+                               const checked = ttmcContentSlugs.includes(content.slug);
                                return <label key={content.slug} className={checked ? "selected" : ""}>
                                  <input disabled={setupLocked || !ttmcOwned} type="checkbox" checked={checked} onChange={() => toggleTtmcContent(content.slug)} />
                                 <b>{content.title}</b>
