@@ -4,7 +4,7 @@
   let { state }: { state: AppState } = $props()
 </script>
 
-<section class="page settings-page" aria-labelledby="settings-title">
+<section class="page" aria-labelledby="settings-title">
   <div class="hero-copy compact">
     <p class="kicker">Keep the cupboard stocked</p>
     <h1 id="settings-title">YOUR <i>ACCOUNTS</i></h1>

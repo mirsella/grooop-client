@@ -274,6 +274,7 @@ async function mockLiveSocket(page: Page) {
     let failedConnectionsRemaining = 0
     let malformedNextActionResult = false
     let rejectNextCommandType: string | null = null
+    let interruptNextCommandType: string | null = null
     const nativeSetTimeout = globalThis.setTimeout.bind(globalThis)
     globalThis.setTimeout = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => nativeSetTimeout(handler, timeout && timeout >= 1_000 ? 5 : timeout, ...args)) as typeof setTimeout
     const teams = {
@@ -348,6 +349,11 @@ async function mockLiveSocket(page: Page) {
         if (typeof data !== 'string') return
         const command = JSON.parse(data) as LiveCommand
         commands.push(command)
+        if (interruptNextCommandType === command.type) {
+          interruptNextCommandType = null
+          setTimeout(() => this.serverDisconnect(), 0)
+          return
+        }
         if (rejectNextCommandType === command.type) {
           rejectNextCommandType = null
           setTimeout(() => this.emit({ type: 'action-error', actionId: command.actionId, message: 'Answer rejected for this test.' }), 0)
@@ -478,6 +484,7 @@ async function mockLiveSocket(page: Page) {
       },
       __e2eSetTtmcState: (aQuestion?: Record<string, unknown>, bQuestion?: Record<string, unknown>, questionsStarted?: boolean) => setTtmcState(aQuestion, bQuestion, questionsStarted),
       __e2eRejectNextCommand: (type: string) => { rejectNextCommandType = type },
+      __e2eInterruptNextCommand: (type: string) => { interruptNextCommandType = type },
       __e2eFinishTtmcRound: () => {
         if (live.gameMode !== 'ttmc' || !live.game) return
         const game = live.game as { state: string; teams: Record<'a' | 'b', Record<string, unknown>> }
@@ -1464,6 +1471,24 @@ test('restores a concealed Proximo draft when the action is rejected', async ({ 
   await expect(answerA).toHaveValue('40')
 })
 
+test('restores an unresolved Proximo draft after reconnecting', async ({ page }) => {
+  await startQuestion(page)
+  const answerA = page.getByRole('spinbutton', { name: 'Team A answer' })
+  await answerA.fill('40')
+  await page.evaluate(() => {
+    (globalThis as typeof globalThis & { __e2eInterruptNextCommand: (type: string) => void })
+      .__e2eInterruptNextCommand('answers')
+  })
+  await page.getByRole('button', { name: 'Lock Team A answer' }).click()
+
+  await expect(answerA).toBeEnabled()
+  await expect(answerA).toHaveValue('40')
+  expect(await page.evaluate(() => {
+    const commands = (globalThis as typeof globalThis & { __e2eSocketCommands: LiveCommand[] }).__e2eSocketCommands
+    return commands.filter((command) => command.type === 'answers')
+  })).toHaveLength(1)
+})
+
 test('blocks quote and create until a delayed active-match restore completes', async ({ page }) => {
   const api = apiState(page)
   api.matches = [structuredClone(match)]
@@ -1493,6 +1518,8 @@ test('does not let a stale initial restore overwrite newer history', async ({ pa
   await page.waitForTimeout(550)
   await expect(page.getByRole('heading', { name: /Newest Team/ })).toBeVisible()
   await expect(page.locator('.match-list')).not.toContainText('Team A vs Team B')
+  await page.getByRole('button', { name: 'Play' }).click()
+  await expect(page.getByRole('button', { name: /Create match — 100 grooopies/ })).toBeEnabled()
 })
 
 test('shows an initial restore failure on Play and retries safely', async ({ page }) => {

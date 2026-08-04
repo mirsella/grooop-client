@@ -16,7 +16,7 @@
   }
 </script>
 
-<section class="page play-page" aria-labelledby="play-title">
+<section class="page" aria-labelledby="play-title">
   <div class="hero-copy">
     <p class="kicker">Set the table / pick your sides</p>
     <h1 id="play-title">LET’S <i>PLAY</i></h1>
@@ -34,7 +34,7 @@
   {/if}
   {#if state.accountError}<p class="api-error" role="alert">{state.accountError}</p>{/if}
 
-  <div class="setup-grid" aria-disabled={state.setupLocked}>
+  <div class="setup-grid">
     <section class="panel accounts-panel" aria-labelledby="lineup-title">
       <header class="panel-heading"><span>01</span><h2 id="lineup-title">The lineup</h2></header>
       {#if state.accounts === null || state.loadingAccounts}
@@ -82,7 +82,7 @@
       </div>
       <div class="roster-columns">
         {#each sides as side}
-          <fieldset class="roster roster-{side}" disabled={state.setupLocked}>
+          <fieldset class="roster" disabled={state.setupLocked}>
             <legend>Team {side.toUpperCase()} roster</legend>
             <div class="preset-picker">
               <label>Saved team
@@ -152,12 +152,11 @@
             <legend>TTMC packs</legend>
             {#if state.ttmcCatalogLoading}<p class="loading">Loading the host’s TTMC packs…</p>{/if}
             {#if state.ttmcCatalogError}
-              <div class="api-error" role="alert"><p>{state.ttmcCatalogError}</p><button class="retry-live" type="button" onclick={() => state.retryTtmcCatalog()}>Retry loading TTMC packs</button></div>
+              <div class="api-error" role="alert"><p>{state.ttmcCatalogError}</p><button class="retry-live" type="button" onclick={() => state.loadTtmcCatalog()}>Retry loading TTMC packs</button></div>
             {/if}
             {#if state.readyTtmcCatalog && !state.readyTtmcCatalog.owned}<p class="api-error" role="alert">The selected host does not own TTMC.</p>{/if}
             {#if state.readyTtmcCatalog?.owned && !state.ttmcContents.length}<p class="api-error" role="alert">No TTMC packs are available for the selected host.</p>{/if}
-            {#if state.readyTtmcCatalog}
-              {#if state.readyTtmcCatalog.owned && state.ttmcContents.length}
+            {#if state.readyTtmcCatalog?.owned && state.ttmcContents.length}
                 {#if state.allTtmcContentsSelected}
                   <p class="ttmc-all-packs selected" role="status"><b>All packs selected</b><span>Every available question pack is in play</span></p>
                 {:else}
@@ -168,12 +167,11 @@
                 <div class="pack-options">
                   {#each state.ttmcContents as pack}
                     <label class:selected={state.ttmcContentSlugs.includes(pack.slug)}>
-                      <input disabled={state.setupLocked || !state.readyTtmcCatalog.owned} type="checkbox" checked={state.ttmcContentSlugs.includes(pack.slug)} onchange={() => state.toggleTtmcContent(pack.slug)} />
+                      <input disabled={state.setupLocked} type="checkbox" checked={state.ttmcContentSlugs.includes(pack.slug)} onchange={() => state.toggleTtmcContent(pack.slug)} />
                       <b>{pack.title}</b><span>{pack.slug}</span>
                     </label>
                   {/each}
                 </div>
-              {/if}
             {/if}
           </fieldset>
           <label class="topic-count"><span class="topic-count-heading">Topics <output for="ttmc-topics" aria-live="polite">{state.draft.rounds}</output></span>
@@ -201,7 +199,7 @@
     </div>
     <p class="sr-only" role="status" aria-live="polite">{state.playBusy === 'quote' ? 'Pricing this match automatically.' : state.quote ? 'Automatic pricing is complete.' : 'Automatic pricing waits for a complete match setup.'}</p>
     <div class="quote-actions">
-      <button class="create-button" type="button" disabled={!state.quote?.userCanSpend || state.playBusy !== null || state.initialRestoreState !== 'ready'} onclick={() => state.submitMatch()}>
+      <button class="create-button" type="button" disabled={!state.setupValid || !state.quote?.userCanSpend || state.playBusy !== null || state.initialRestoreState !== 'ready'} onclick={() => state.submitMatch()}>
         {state.playBusy === 'create' ? 'Creating match…' : state.quote ? `Create match — ${state.quote.cost} grooopies →` : state.playBusy === 'quote' ? 'Pricing match…' : 'Finish setup'}
       </button>
       {#if !state.quote && state.playError && state.setupValid && state.initialRestoreState === 'ready' && state.playBusy === null}

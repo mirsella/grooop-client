@@ -1,6 +1,5 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte'
-  import { fly } from 'svelte/transition'
   import { AppState } from './lib/app-state.svelte'
   import type { Tab } from './lib/domain'
   import PlayPage from './pages/PlayPage.svelte'
@@ -17,33 +16,24 @@
     { id: 'settings', label: 'Settings' },
   ]
 
-  function quoteEffect(_signature: string, _valid: boolean, _restore: string, _refresh: number) {
-    untrack(() => app.scheduleQuote())
-  }
-
-  function catalogEffect(_mode: string, _host: string, _refresh: number) {
-    untrack(() => void app.loadTtmcCatalog())
-  }
-
-  function liveEffect(_match: unknown, _action: unknown, _socket: string, _matchId: string | null) {
-    untrack(() => app.syncLiveEffects())
-  }
-
   onMount(() => {
     void app.init()
     return () => app.destroy()
   })
 
   $effect(() => {
-    quoteEffect(app.setupSignature, app.setupValid, app.initialRestoreState, app.quoteRefresh)
+    void [app.setupSignature, app.setupValid, app.initialRestoreState]
+    untrack(() => app.scheduleQuote())
   })
 
   $effect(() => {
-    catalogEffect(app.draft.gameMode, app.ttmcHostAccountId, app.ttmcCatalogRefresh)
+    void [app.draft.gameMode, app.ttmcHostAccountId]
+    untrack(() => void app.loadTtmcCatalog())
   })
 
   $effect(() => {
-    liveEffect(app.live.match, app.live.inFlight, app.live.state, app.currentMatchId)
+    void [app.live.match, app.live.inFlight, app.live.state, app.live.matchId]
+    untrack(() => app.syncLiveEffects())
   })
 </script>
 
@@ -65,13 +55,9 @@
   </nav>
 
   <div class="page-stage">
-    {#key app.tab}
-      <div class="page-reveal" in:fly={{ y: 12, duration: 260 }}>
-        {#if app.tab === 'play'}<PlayPage state={app} />
-        {:else if app.tab === 'match'}<MatchPage state={app} />
-        {:else if app.tab === 'history'}<HistoryPage state={app} />
-        {:else}<SettingsPage state={app} />{/if}
-      </div>
-    {/key}
+    {#if app.tab === 'play'}<PlayPage state={app} />
+    {:else if app.tab === 'match'}<MatchPage state={app} />
+    {:else if app.tab === 'history'}<HistoryPage state={app} />
+    {:else}<SettingsPage state={app} />{/if}
   </div>
 </main>

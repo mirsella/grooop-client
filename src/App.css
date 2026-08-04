@@ -28,7 +28,6 @@
 .tabbar button.active { color: var(--ink); }
 .tabbar button.active::after { transform: scaleX(1); }
 .page-stage { max-width: 1260px; min-height: calc(100svh - 136px); margin: auto; }
-.page-reveal { min-width: 0; }
 .page { min-width: 0; padding: clamp(34px, 6vw, 76px) clamp(16px, 4vw, 52px) 72px; }
 
 .hero-copy { position: relative; max-width: 780px; margin-bottom: 32px; }
@@ -211,7 +210,6 @@ input:hover, select:hover { border-color: #8b968e; }
 .ttmc-answer-controls label { display: grid; gap: 8px; }
 .word-answer { display: flex; flex-wrap: wrap; gap: 6px; }
 .answer-instruction { color: var(--muted); font: 500 9px var(--mono); text-transform: uppercase; }
-.ttmc-controls { margin-top: 0; }
 .ttmc-controls .lock-both { justify-self: stretch; color: var(--ink); background: var(--lime); }
 .waiting-note { color: var(--ink); background: var(--lime); }
 

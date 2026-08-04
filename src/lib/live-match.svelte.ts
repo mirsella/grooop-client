@@ -22,6 +22,7 @@ export class LiveMatchConnection {
   private retries = 0
   private reconnectTimer: number | undefined
   private heartbeat: number | undefined
+  private interrupted = false
 
   constructor(
     private readonly onActionError: (command: MatchCommand) => void,
@@ -36,6 +37,7 @@ export class LiveMatchConnection {
     this.result = ''
     this.error = ''
     this.inFlight = null
+    this.interrupted = false
     this.retryAvailable = false
     if (!matchId) {
       this.state = 'idle'
@@ -69,7 +71,7 @@ export class LiveMatchConnection {
       if (this.stopped || this.socket !== socket) return
       if (this.heartbeat !== undefined) window.clearInterval(this.heartbeat)
       this.socket = null
-      this.inFlight = null
+      this.interrupted = this.inFlight !== null
       this.result = ''
       if (this.retries >= 6) {
         this.state = 'idle'
@@ -86,7 +88,7 @@ export class LiveMatchConnection {
 
   private breakConnection(socket: WebSocket, message: string) {
     this.match = null
-    this.inFlight = null
+    this.interrupted = this.inFlight !== null
     this.result = ''
     this.error = message
     socket.onmessage = null
@@ -104,6 +106,11 @@ export class LiveMatchConnection {
       this.retries = 0
       this.match = message.match
       this.onState(message.match)
+      if (this.interrupted && this.inFlight) {
+        this.onActionError(this.inFlight.command)
+        this.inFlight = null
+        this.interrupted = false
+      }
       this.error = ''
       return
     }
@@ -116,6 +123,7 @@ export class LiveMatchConnection {
       this.error = ''
       this.result = resultText(message.result as ActionResult)
       this.inFlight = null
+      this.interrupted = false
       return
     }
     if (message.type === 'action-error') {
@@ -127,6 +135,7 @@ export class LiveMatchConnection {
         typeof message.error === 'string' ? message.error : 'The match action was rejected.'
       this.onActionError(this.inFlight.command)
       this.inFlight = null
+      this.interrupted = false
       return
     }
     if (message.type === 'connection') {

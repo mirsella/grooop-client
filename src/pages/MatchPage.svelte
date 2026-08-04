@@ -6,7 +6,7 @@
   let { state }: { state: AppState } = $props()
 </script>
 
-<section class="page match-page" aria-labelledby="match-title">
+<section class="page" aria-labelledby="match-title">
   <div class="hero-copy compact"><p class="kicker">Grooop / live desk</p><h1 id="match-title">ON <i>THE AIR</i></h1></div>
   <p class="sr-only" aria-live="polite" aria-atomic="true">{state.liveAnnouncement}</p>
   {#if !state.currentMatchId}
@@ -16,9 +16,6 @@
     {#if state.live.error}<p class="api-error" role="alert">{state.live.error}</p>{/if}
     {#if state.live.retryAvailable}<button class="retry-live" type="button" onclick={state.live.retry}>Retry live connection</button>{/if}
     {#if state.live.result}<p class="command-message" role="status">{state.live.result}</p>{/if}
-    {#if state.live.match?.gameMode === 'ttmc' && !state.ttmcGame && state.matchLive && ['waiting', 'running'].includes(state.live.match.party.state.toLowerCase())}
-      <button class="retry-live start-topic" type="button" disabled={!state.gameplayEnabled || state.live.inFlight !== null} onclick={() => state.live.send({ type: 'start-ttmc-round' })}>{state.live.inFlight?.command.type === 'start-ttmc-round' ? 'Starting topic…' : 'Start first topic →'}</button>
-    {/if}
     {#if !state.live.match}
       <div class="match-ticket"><span>CONNECTING / {state.currentMatch?.status ?? 'MATCH'}</span><b>{state.currentMatch?.teamA.name ?? 'TEAM A'} <i>vs</i> {state.currentMatch?.teamB.name ?? 'TEAM B'}</b><p>The live desk will appear as soon as the match socket sends its first state.</p></div>
     {:else}

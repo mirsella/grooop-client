@@ -11,10 +11,13 @@
   const answerReady = $derived(activeQuestion && active ? isCompleteTtmcAnswer(activeQuestion, ttmcAnswerValue(activeQuestion, state.ttmcAnswers[active])) : false)
 </script>
 
-<section class="panel game-board ttmc-board" aria-labelledby="game-title">
+<section class="panel game-board" aria-labelledby="game-title">
   <header class="panel-heading"><span>02</span><h2 id="game-title">TTMC</h2></header>
   {#if !game}
     <div class="empty-state"><strong>{state.live.match?.party.state.toLowerCase() === 'waiting' ? 'Ready to start the first topic.' : 'No topic in play.'}</strong></div>
+    {#if state.matchLive && ['waiting', 'running'].includes(state.live.match?.party.state.toLowerCase() ?? '')}
+      <button class="retry-live" type="button" disabled={state.gameplayDraftDisabled} onclick={() => state.live.send({ type: 'start-ttmc-round' })}>{state.live.inFlight?.command.type === 'start-ttmc-round' ? 'Starting topic…' : 'Start first topic →'}</button>
+    {/if}
   {:else}
     <div class="game-meta"><span>{game.category ?? 'Category pending'}</span><span>Topic {game.roundNumber} / {game.totalRounds}</span></div>
     <h3>{game.title ?? 'Choose a difficulty to begin.'}</h3>
@@ -31,6 +34,8 @@
             <button type="button" disabled={state.live.inFlight !== null} onclick={() => state.live.send({ type: 'next-ttmc-round', roundId: game.id })}>{state.live.inFlight?.command.type === 'next-ttmc-round' ? 'Starting next topic…' : 'Start next topic →'}</button>
           {:else}<p>Waiting for the party before the next topic can start.</p>{/if}
         {/if}
+      {:else if game.state === 'unknown'}
+        <h4>Synchronizing this topic…</h4><p>No action is needed. The current turn will appear automatically.</p>
       {:else if !active}
         <h4>Both answers are locked.</h4><p>Waiting for Grooop to score this topic. No action is needed.</p>
       {:else if game.teams[active].difficulty === null}
@@ -44,7 +49,7 @@
     <ol class="ttmc-turn-rail" aria-label="Topic turn order">
       {#each order as side, index}
         {@const done = game.teams[side].submitted}
-        <li class="side-{side}" class:done class:active={side === active} class:waiting={!done && side !== active}>
+        <li class="side-{side}" class:done class:active={side === active}>
           <span>Turn {index + 1}</span><b>{state.live.match?.teams[side].name}</b><em>{done ? 'Done' : side === active ? 'Up now' : 'Waiting'}</em>
         </li>
       {/each}
@@ -63,16 +68,16 @@
               <fieldset class="difficulty-grid"><legend class="sr-only">Team {side.toUpperCase()} difficulty</legend>
                 {#each Array.from({ length: 10 }, (_, index) => index + 1) as difficulty}
                   <button type="button" disabled={state.gameplayDraftDisabled} aria-pressed={state.ttmcDifficulties[side] === difficulty}
-                    onclick={() => state.ttmcDifficulties = { ...state.ttmcDifficulties, [side]: difficulty }}>{difficulty}</button>
+                    onclick={() => state.ttmcDifficulties[side] = difficulty}>{difficulty}</button>
                 {/each}
               </fieldset>
               <div class="difficulty-readout"><b>{state.ttmcDifficulties[side]} / 10</b><span>{state.ttmcDifficulties[side] <= 3 ? 'Safe bet' : state.ttmcDifficulties[side] <= 6 ? 'Confident' : state.ttmcDifficulties[side] <= 8 ? 'Bold' : 'All in'}</span></div>
-              <button class="difficulty-lock" type="button" disabled={!state.matchLive || !state.gameplayEnabled || state.live.inFlight !== null || game.state !== 'running'} onclick={() => state.startTtmcQuestion(side)}>Lock in {state.ttmcDifficulties[side]} for Team {side.toUpperCase()} →</button>
+              <button class="difficulty-lock" type="button" disabled={!state.matchLive || state.gameplayDraftDisabled || game.state !== 'running'} onclick={() => state.startTtmcQuestion(side)}>Lock in {state.ttmcDifficulties[side]} for Team {side.toUpperCase()} →</button>
             </div>
           {:else}
             <p>Difficulty {team.difficulty ?? '—'} / 10</p>
             {#if team.question && !team.submitted}
-              <div class="ttmc-question"><p class="reader-handoff"><b>Team {reader.toUpperCase()}, read this aloud.</b>Team {side.toUpperCase()} gives the final answer.</p><b>{team.question.prompt}</b><TtmcAnswerControls {state} {side} question={team.question} /></div>
+              <div class="ttmc-question"><p class="reader-handoff"><b>Team {reader.toUpperCase()}, read this aloud.</b>Team {side.toUpperCase()} gives the final answer.</p><b>{team.question.prompt}</b><TtmcAnswerControls {side} question={team.question} disabled={state.gameplayDraftDisabled} bind:answer={state.ttmcAnswers[side]} /></div>
             {/if}
             {#if team.submitted && !finished}<p class="submitted-note">Submitted</p>{/if}
             {#if finished}
@@ -90,7 +95,7 @@
   <section class="control-deck ttmc-controls" aria-labelledby="controls-title">
     <div><p class="kicker">Make the call</p><h2 id="controls-title">Controls</h2></div>
     {#if game.state === 'running'}
-      <button class="lock-both" type="button" disabled={!state.gameplayEnabled || state.live.inFlight !== null || !answerReady} onclick={() => state.submitTtmcAnswers()}>
+      <button class="lock-both" type="button" disabled={state.gameplayDraftDisabled || !answerReady} onclick={() => state.submitTtmcAnswers()}>
         {state.live.inFlight?.command.type === 'ttmc-answers' ? 'Locking answers…' : active ? `Lock Team ${active.toUpperCase()} answer` : 'Both turns locked'}
       </button>
     {/if}

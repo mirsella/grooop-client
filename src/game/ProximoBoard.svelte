@@ -5,13 +5,13 @@
   let { state: app }: { state: AppState } = $props()
   let now = $state(Date.now())
   onMount(() => {
-    const timer = window.setInterval(() => now = Date.now(), 50)
+    const timer = window.setInterval(() => now = Date.now(), 250)
     return () => window.clearInterval(timer)
   })
   const game = $derived(app.proximoGame)
   const revealed = $derived(game?.showAnswer === true)
   const questionActive = $derived(game?.showAnswer === false && Boolean(game.question) && typeof game.currentRound === 'number' && game.currentRound >= 0)
-  const seconds = $derived(game?.questionDeadlineAt === null || game?.questionDeadlineAt === undefined ? 0 : Math.max(0, Math.ceil((game.questionDeadlineAt - Math.max(now, Date.now())) / 1000)))
+  const seconds = $derived(game?.questionDeadlineAt === null || game?.questionDeadlineAt === undefined ? 0 : Math.max(0, Math.min(game.questionDurationSeconds ?? Infinity, Math.floor((game.questionDeadlineAt - now) / 1000))))
   const timerLabel = $derived(`${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`)
   const answeringClosed = $derived(questionActive && (game?.questionDeadlineAt === null || seconds === 0))
   const submitted = $derived(app.proximoSubmitted)
@@ -19,7 +19,7 @@
   const locallyLocked = $derived({ a: submitted.a || sending.a !== undefined, b: submitted.b || sending.b !== undefined })
   const unresolved = $derived(sides.filter((side) => !locallyLocked[side]))
   const ready = $derived(unresolved.filter((side) => app.answers[side] !== '' && Number.isSafeInteger(Number(app.answers[side])) && Number(app.answers[side]) >= 0))
-  const readyKey = $derived(app.currentMatchId && game && isGameId(game.id) ? `${app.currentMatchId}:${game.id}` : null)
+  const readyKey = $derived(app.live.matchId && game && isGameId(game.id) ? `${app.live.matchId}:${game.id}` : null)
 </script>
 
 <section class="panel game-board" aria-labelledby="game-title">
@@ -51,13 +51,13 @@
     {#if !game && app.live.match?.party.state.toLowerCase() === 'waiting'}
       <p class="control-note">The party is waiting. No live action is available yet.</p>
     {:else if !game && app.matchLive}
-      <button disabled={!app.gameplayEnabled || app.live.inFlight !== null} type="button" onclick={() => app.live.send({ type: 'start-proximo' })}>{app.live.inFlight?.command.type === 'start-proximo' ? 'Setting up question…' : 'Start first question →'}</button>
+       <button disabled={app.gameplayDraftDisabled} type="button" onclick={() => app.live.send({ type: 'start-proximo' })}>{app.live.inFlight?.command.type === 'start-proximo' ? 'Setting up question…' : 'Start first question →'}</button>
     {:else if game && !revealed && !app.gameReady && app.matchLive}
       {#if app.live.inFlight?.command.type === 'ready'}<p class="control-note" role="status">Opening the question…</p>
-      {:else if app.autoReadyKey === readyKey}<button disabled={!app.gameplayEnabled || app.live.inFlight !== null} type="button" onclick={() => app.live.send({ type: 'ready', gameId: game.id })}>Retry opening question</button>
+       {:else if app.autoReadyKey === readyKey}<button disabled={app.gameplayDraftDisabled} type="button" onclick={() => app.live.send({ type: 'ready', gameId: game.id })}>Retry opening question</button>
       {:else}<p class="control-note" role="status">Question setup is synchronizing…</p>{/if}
     {:else if game && revealed && app.matchLive && app.live.match?.party.state.toLowerCase() === 'running'}
-      <button disabled={!app.gameplayEnabled || app.live.inFlight !== null} type="button" onclick={() => app.live.send({ type: 'next-proximo', gameId: game.id })}>{app.live.inFlight?.command.type === 'next-proximo' ? 'Adding question…' : 'Start next question →'}</button>
+      <button disabled={app.gameplayDraftDisabled} type="button" onclick={() => app.live.send({ type: 'next-proximo', gameId: game.id })}>{app.live.inFlight?.command.type === 'next-proximo' ? 'Adding question…' : 'Start next question →'}</button>
     {/if}
   </div>
   {#if game && questionActive}
@@ -65,16 +65,16 @@
       {#each sides as side}
         <label>Team {side.toUpperCase()} answer
           {#if locallyLocked[side]}<span class="submitted-note">{submitted[side] ? 'Submitted' : 'Sending…'}</span>{:else if unresolved.length === 1}<span class="unresolved-note">Still needed</span>{/if}
-          <input disabled={locallyLocked[side] || !app.gameplayEnabled || app.live.inFlight !== null || answeringClosed} type="number" min="0" step="1" inputmode="numeric"
-            value={locallyLocked[side] ? '' : app.answers[side]} oninput={(event) => app.answers = { ...app.answers, [side]: event.currentTarget.value }} />
+          <input disabled={locallyLocked[side] || app.gameplayDraftDisabled || answeringClosed} type="number" min="0" step="1" inputmode="numeric"
+            value={locallyLocked[side] ? '' : app.answers[side]} oninput={(event) => app.answers[side] = event.currentTarget.value} />
         </label>
       {/each}
       {#if answeringClosed}<p class="answer-closed" role="status">Answering is closed for this question.</p>{/if}
-      <button class="lock-both" disabled={!ready.length || !app.gameplayEnabled || app.live.inFlight !== null || answeringClosed} type="button" onclick={() => app.submitAnswers()}>
+      <button class="lock-both" disabled={!ready.length || app.gameplayDraftDisabled || answeringClosed} type="button" onclick={() => app.submitAnswers()}>
         {answeringClosed ? 'Answering closed' : app.live.inFlight?.command.type === 'answers' ? 'Locking answers…' : !unresolved.length ? 'Both answers locked' : ready.length === 1 ? `Lock Team ${ready[0].toUpperCase()} answer` : 'Lock both answers'}
       </button>
     </div>
   {/if}
-  {#if app.matchLive}<button class="finish-action" disabled={!app.gameplayEnabled || app.live.inFlight !== null} type="button" onclick={() => app.finishMatch()}>End match</button>
+  {#if app.matchLive}<button class="finish-action" disabled={app.gameplayDraftDisabled} type="button" onclick={() => app.finishMatch()}>End match</button>
   {:else}<p class="terminal-note">This match is closed. Its result remains in History.</p>{/if}
 </section>

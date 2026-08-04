@@ -27,7 +27,7 @@
           {#each group.items as match, index}
             <li>
               <div class="match-number">{String(index + 1).padStart(2, '0')}</div>
-              <div class="match-copy">
+              <div>
                 <span class="match-status">{match.status}</span>
                 <h3>{match.teamA.name} <i>vs</i> {match.teamB.name}</h3>
                 <p>{description(match)} · {match.cost} grooopies</p>

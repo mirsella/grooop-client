@@ -37,7 +37,9 @@ import {
   isCompleteTtmcAnswer,
   isGameId,
   isResumableMatch,
+  isResumableStatus,
   isRound,
+  isTerminalStatus,
   loadStoredDraft,
   lowestBalanceSide,
   sides,
@@ -76,12 +78,10 @@ export class AppState {
   presetBusy = $state<string | null>(null)
   presetError = $state('')
   ttmcCatalog = $state<TtmcCatalogResource>({ status: 'idle' })
-  ttmcCatalogRefresh = $state(0)
   matches = $state<Match[]>([])
   questions = $state<ObservedQuestion[] | null>(null)
   historyLoading = $state(false)
   historyError = $state('')
-  currentMatchId = $state<string | null>(null)
   resumingMatchId = $state<string | null>(null)
   cancellingMatchId = $state<string | null>(null)
   answers = $state<Record<Side, string>>({ a: '', b: '' })
@@ -89,21 +89,14 @@ export class AppState {
   ttmcDifficulties = $state<Record<Side, number>>({ a: 1, b: 1 })
   liveAnnouncement = $state('')
   autoReadyKey = $state<string | null>(null)
-  quoteRefresh = $state(0)
 
   readonly live: LiveMatchConnection
-  private quoteVersion = 0
   private quoteController: AbortController | null = null
   private quoteTimer: number | undefined
   private catalogController: AbortController | null = null
-  private accountLoadVersion = 0
-  private presetLoadVersion = 0
   private matchLoadVersion = 0
-  private questionLoadVersion = 0
   private historyLoadVersion = 0
-  private terminalMatchStates = new Map<string, string>()
   private initialRestoreAllowed = true
-  private autoReadySentKey: string | null = null
   private announcedQuestion = ''
   private announcedReveal = ''
   private announcedTtmcTopic = ''
@@ -111,7 +104,6 @@ export class AppState {
   private announcedTtmcResult = ''
   private answerGameKey = ''
   private destroyed = false
-  private lifecycleController = new AbortController()
 
   constructor() {
     this.live = new LiveMatchConnection(
@@ -182,13 +174,14 @@ export class AppState {
     if (!this.ttmcRoundsValid) return 'The TTMC topic count is unavailable.'
     return ''
   }
-  get currentMatch() { return this.matches.find((match) => match.id === this.currentMatchId) }
+  get currentMatchId() { return this.live.matchId }
+  get currentMatch() { return this.matches.find((match) => match.id === this.live.matchId) }
   get activeMatches() { return this.matches.filter(isResumableMatch) }
   get pastMatches() { return this.matches.filter((match) => !isResumableMatch(match)) }
   get proximoGame() { return this.live.match?.gameMode === 'proximo' ? this.live.match.game : null }
   get ttmcGame() { return this.live.match?.gameMode === 'ttmc' ? this.live.match.game : null }
   get activeTtmcTeam() { return this.ttmcGame ? activeTtmcSide(this.ttmcGame) : null }
-  get matchLive() { return this.live.match !== null && !['finished', 'failed', 'cancelled'].includes(this.live.match.status.toLowerCase()) }
+  get matchLive() { return this.live.match !== null && isResumableStatus(this.live.match.status) }
   get gameplayEnabled() { return this.live.state === 'open' && this.live.match?.connected === true }
   get gameplayDraftDisabled() { return !this.gameplayEnabled || this.live.inFlight !== null }
   get gameReady() { return (this.proximoGame?.scores.length ?? 0) >= 2 && this.proximoGame?.scores.every((score) => score.isReady) === true }
@@ -196,24 +189,12 @@ export class AppState {
   async init() {
     void this.loadAccounts()
     void this.loadPresets()
-    if (document.readyState !== 'complete') {
-      const signal = this.lifecycleController.signal
-      await Promise.race([
-        new Promise<void>((resolve) => window.addEventListener('load', () => resolve(), { once: true, signal })),
-        new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true })),
-      ])
-    }
-    if (this.destroyed) return
     await this.restoreInitialMatch()
   }
 
   destroy() {
     this.destroyed = true
-    this.lifecycleController.abort()
-    this.accountLoadVersion += 1
-    this.presetLoadVersion += 1
     this.matchLoadVersion += 1
-    this.questionLoadVersion += 1
     this.historyLoadVersion += 1
     this.live.close()
     this.quoteController?.abort()
@@ -247,16 +228,16 @@ export class AppState {
   }
 
   private invalidateQuote() {
+    if (this.quoteTimer !== undefined) window.clearTimeout(this.quoteTimer)
+    this.quoteTimer = undefined
     this.quoteController?.abort()
     this.quoteController = null
-    this.quoteVersion += 1
     this.quote = null
     if (this.playBusy === 'quote') this.playBusy = null
   }
 
   refreshQuote = () => {
     this.invalidateQuote()
-    this.quoteRefresh += 1
     this.scheduleQuote()
   }
 
@@ -272,7 +253,6 @@ export class AppState {
       return
     }
     const setup = structuredClone($state.snapshot(this.setup)) as MatchSetup
-    const version = ++this.quoteVersion
     this.quoteController?.abort()
     const controller = new AbortController()
     this.quoteController = controller
@@ -281,11 +261,11 @@ export class AppState {
     this.playError = ''
     try {
       const { quote } = await quoteMatch(setup, controller.signal)
-      if (this.quoteVersion === version) this.quote = { ...quote, setup, idempotencyKey: crypto.randomUUID() }
+      if (this.quoteController === controller) this.quote = { ...quote, setup, idempotencyKey: crypto.randomUUID() }
     } catch (error) {
-      if (!controller.signal.aborted && this.quoteVersion === version) this.playError = errorMessage(error, 'Could not quote this match.')
+      if (!controller.signal.aborted && this.quoteController === controller) this.playError = errorMessage(error, 'Could not quote this match.')
     } finally {
-      if (this.quoteVersion === version) {
+      if (this.quoteController === controller) {
         this.quoteController = null
         this.playBusy = null
       }
@@ -293,16 +273,14 @@ export class AppState {
   }
 
   async submitMatch() {
-    if (!this.quote?.userCanSpend || this.initialRestoreState !== 'ready') return
+    if (!this.setupValid || !this.quote?.userCanSpend || this.initialRestoreState !== 'ready') return
     this.playBusy = 'create'
     this.playError = ''
     try {
       const { match } = await createMatch(this.quote.setup, this.quote.cost, this.quote.idempotencyKey)
       if (!isCancellableMatch(match)) throw new Error(`The match returned an invalid status: ${match.status}.`)
       this.invalidateQuote()
-      this.matchLoadVersion += 1
       this.matches = [match, ...this.matches.filter((item) => item.id !== match.id)]
-      this.currentMatchId = match.id
       this.navigate('match')
       this.live.open(match.id)
     } catch (error) {
@@ -327,32 +305,31 @@ export class AppState {
   }
 
   async loadAccounts() {
-    const version = ++this.accountLoadVersion
+    this.invalidateQuote()
     this.loadingAccounts = true
     this.accountError = ''
     try {
       const { accounts } = await getAccounts()
-      if (this.accountLoadVersion !== version) return
       this.accounts = accounts
       this.reconcileAccountAssignments(accounts)
     } catch (error) {
-      if (this.accountLoadVersion === version) this.accountError = errorMessage(error, 'Could not load the account list.')
-    } finally { if (this.accountLoadVersion === version) this.loadingAccounts = false }
+      this.accountError = errorMessage(error, 'Could not load the account list.')
+    } finally { this.loadingAccounts = false }
   }
 
   async loadPresets() {
-    const version = ++this.presetLoadVersion
     this.presetError = ''
     try {
       const { presets } = await getTeamPresets()
-      if (this.presetLoadVersion === version) this.presets = presets
-    } catch (error) { if (this.presetLoadVersion === version) this.presetError = errorMessage(error, 'Could not load team presets.') }
+      this.presets = presets
+    } catch (error) { this.presetError = errorMessage(error, 'Could not load team presets.') }
   }
 
   async loadTtmcCatalog() {
     this.catalogController?.abort()
     const host = this.ttmcHostAccountId
     if (this.draft.gameMode !== 'ttmc' || !host) { this.ttmcCatalog = { status: 'idle' }; return }
+    this.invalidateQuote()
     const controller = new AbortController()
     this.catalogController = controller
     this.ttmcCatalog = { status: 'loading', hostAccountId: host }
@@ -377,7 +354,6 @@ export class AppState {
     }
   }
 
-  retryTtmcCatalog() { this.ttmcCatalogRefresh += 1 }
   toggleTtmcContent(slug: string) {
     this.editDraft((draft) => {
       const current = draft.ttmcSelections[this.ttmcHostAccountId]?.slugs ?? []
@@ -392,7 +368,13 @@ export class AppState {
   }
 
   private reconcileTerminal(loaded: Match[]) {
-    return loaded.map((match) => this.terminalMatchStates.has(match.id) ? { ...match, status: this.terminalMatchStates.get(match.id)! } : match)
+    const terminal = new Map(this.matches.filter((match) => isTerminalStatus(match.status)).map((match) => [match.id, match.status]))
+    return loaded.map((match) => terminal.has(match.id) ? { ...match, status: terminal.get(match.id)! } : match)
+  }
+  private settleStaleRestore() {
+    if (this.destroyed || this.initialRestoreState !== 'loading') return
+    this.initialRestoreState = 'ready'
+    this.scheduleQuote()
   }
   async restoreInitialMatch() {
     const version = ++this.matchLoadVersion
@@ -400,23 +382,28 @@ export class AppState {
     this.initialRestoreError = ''
     try {
       const result = await getMatches()
-      if (this.matchLoadVersion !== version) return
+      if (this.matchLoadVersion !== version) {
+        this.settleStaleRestore()
+        return
+      }
       const reconciled = this.reconcileTerminal(result.matches)
       this.matches = reconciled
       let active = reconciled.find(isResumableMatch)
       if (active?.status.toLowerCase() === 'joining') {
         active = (await resumeMatch(active.id)).match
-        if (this.matchLoadVersion !== version) return
+        if (this.matchLoadVersion !== version || this.destroyed) {
+          this.settleStaleRestore()
+          return
+        }
         this.matches = [active, ...this.matches.filter((item) => item.id !== active!.id)]
       }
       this.initialRestoreState = 'ready'
       if (active && this.initialRestoreAllowed) {
-        this.currentMatchId = active.id
         this.tab = 'match'
         this.live.open(active.id)
       } else this.scheduleQuote()
     } catch (error) {
-      if (this.matchLoadVersion !== version) return
+      if (this.matchLoadVersion !== version || this.destroyed) return
       this.initialRestoreError = errorMessage(error, 'Could not restore the active match.')
       this.initialRestoreState = 'error'
     }
@@ -425,7 +412,6 @@ export class AppState {
   async loadHistory() {
     const loadingVersion = ++this.historyLoadVersion
     const matchesVersion = ++this.matchLoadVersion
-    const questionsVersion = ++this.questionLoadVersion
     this.historyLoading = true
     this.historyError = ''
     const [matches, questions] = await Promise.allSettled([getMatches(), getObservedQuestions()])
@@ -433,7 +419,7 @@ export class AppState {
     const errors: string[] = []
     if (matches.status === 'fulfilled' && this.matchLoadVersion === matchesVersion) this.matches = this.reconcileTerminal(matches.value.matches)
     else if (matches.status === 'rejected') errors.push(errorMessage(matches.reason, 'Could not load match history.'))
-    if (questions.status === 'fulfilled' && this.questionLoadVersion === questionsVersion) this.questions = questions.value.questions
+    if (questions.status === 'fulfilled') this.questions = questions.value.questions
     else if (questions.status === 'rejected') errors.push(errorMessage(questions.reason, 'Could not load question history.'))
     this.historyError = errors.join(' ')
     this.historyLoading = false
@@ -451,7 +437,7 @@ export class AppState {
     try {
       await verifyChallenge(this.challenge.id, this.code.trim())
       this.challenge = null; this.email = ''; this.code = ''
-      await this.loadAccounts(); this.ttmcCatalogRefresh += 1
+      await this.loadAccounts()
     } catch (error) { this.accountError = errorMessage(error, 'That code could not be confirmed.') }
     finally { this.accountBusy = null }
   }
@@ -460,12 +446,11 @@ export class AppState {
     this.accountError = ''; this.accountBusy = `${operation}-${id}`
     try {
       if (operation === 'refresh') {
-        this.accountLoadVersion += 1
         const { account } = await refreshAccount(id)
         if (this.accounts === null) { console.warn('Received an account refresh while the account list is unavailable.'); return }
         this.accounts = this.accounts.map((item) => item.id === id ? account : item)
         this.reconcileAccountAssignments(this.accounts)
-        if (id === this.ttmcHostAccountId) this.ttmcCatalogRefresh += 1
+        if (id === this.ttmcHostAccountId) void this.loadTtmcCatalog()
       } else { await deleteAccount(id); await this.loadAccounts() }
     } catch (error) {
       if (operation === 'refresh' && error instanceof ApiError && (error.status === 401 || error.code.includes('unauthorized'))) await this.loadAccounts()
@@ -485,7 +470,7 @@ export class AppState {
   }
   async savePreset(side: Side) {
     const input = cleanTeam(this.draft.teams[side]); if (!input.name || !input.roster.length) return
-    const id = this.presetSelections[side]; this.presetError = ''; this.presetBusy = `save-${side}`; this.presetLoadVersion += 1
+    const id = this.presetSelections[side]; this.presetError = ''; this.presetBusy = `save-${side}`
     try {
       const { preset } = id ? await updateTeamPreset(id, input) : await createTeamPreset(input)
       this.presets = [preset, ...(this.presets ?? []).filter((item) => item.id !== preset.id)]
@@ -495,7 +480,7 @@ export class AppState {
   }
   async removePreset(side: Side) {
     const id = this.presetSelections[side]; if (!id || !confirm('Delete this team preset?')) return
-    this.presetError = ''; this.presetBusy = `delete-${side}`; this.presetLoadVersion += 1
+    this.presetError = ''; this.presetBusy = `delete-${side}`
     try {
       await deleteTeamPreset(id)
       this.presets = this.presets?.filter((item) => item.id !== id) ?? null
@@ -504,7 +489,7 @@ export class AppState {
     finally { this.presetBusy = null }
   }
 
-  openMatch(id: string) { this.initialRestoreAllowed = false; this.currentMatchId = id; this.navigate('match'); this.live.open(id) }
+  openMatch(id: string) { this.initialRestoreAllowed = false; this.navigate('match'); this.live.open(id) }
   async resumeAndOpen(match: Match) {
     this.historyError = ''; this.resumingMatchId = match.id
     try {
@@ -519,9 +504,9 @@ export class AppState {
     this.historyError = ''; this.cancellingMatchId = match.id
     try {
       const { match: cancelled } = await cancelMatch(match.id)
-      this.terminalMatchStates.set(cancelled.id, cancelled.status); this.matchLoadVersion += 1
+      this.matchLoadVersion += 1
       this.matches = this.matches.map((item) => item.id === cancelled.id ? cancelled : item)
-      if (this.currentMatchId === cancelled.id) { this.currentMatchId = null; this.live.open(null) }
+      if (this.live.matchId === cancelled.id) this.live.open(null)
       this.refreshQuote()
     } catch (error) { this.historyError = errorMessage(error, 'Could not cancel this match.') }
     finally { this.cancellingMatchId = null }
@@ -583,9 +568,9 @@ export class AppState {
         const next = { ...this.ttmcAnswers }; confirmed.forEach((side) => { delete next[side] }); this.ttmcAnswers = next
       }
     }
-    const readyKey = this.currentMatchId && proximo && isGameId(proximo.id) ? `${this.currentMatchId}:${proximo.id}` : null
-    if (readyKey && proximo?.currentRound === -1 && !this.gameReady && !proximo.showAnswer && this.gameplayEnabled && !this.live.inFlight && this.autoReadySentKey !== readyKey) {
-      this.autoReadySentKey = readyKey; this.autoReadyKey = readyKey; this.live.send({ type: 'ready', gameId: proximo.id })
+    const readyKey = this.live.matchId && proximo && isGameId(proximo.id) ? `${this.live.matchId}:${proximo.id}` : null
+    if (readyKey && proximo?.currentRound === -1 && !this.gameReady && !proximo.showAnswer && this.gameplayEnabled && !this.live.inFlight && this.autoReadyKey !== readyKey) {
+      this.autoReadyKey = readyKey; this.live.send({ type: 'ready', gameId: proximo.id })
     }
     if (proximo && isGameId(proximo.id) && isRound(proximo.currentRound)) {
       const key = `${proximo.id}:${proximo.currentRound}`
@@ -612,12 +597,14 @@ export class AppState {
 
   private actionRejected(command: MatchCommand) {
     if (command.type === 'answers') {
-      this.answers = { ...this.answers, ...Object.fromEntries(Object.entries(command.answers).map(([side, value]) => [side, String(value)])) }
+      const unresolved = Object.entries(command.answers).filter(([side]) => !this.proximoSubmitted[side as Side])
+      this.answers = { ...this.answers, ...Object.fromEntries(unresolved.map(([side, value]) => [side, String(value)])) }
     }
   }
   private authoritativeState(match: import('../api').LiveMatch) {
-    if (!['finished', 'failed', 'cancelled'].includes(match.status.toLowerCase()) || this.terminalMatchStates.has(match.id)) return
-    this.terminalMatchStates.set(match.id, match.status); this.matchLoadVersion += 1
+    const current = this.matches.find((item) => item.id === match.id)
+    if (!isTerminalStatus(match.status) || current?.status === match.status) return
+    this.matchLoadVersion += 1
     this.matches = this.matches.map((item) => item.id === match.id ? { ...item, status: match.status } : item)
     this.refreshQuote()
   }

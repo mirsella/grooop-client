@@ -5,6 +5,7 @@ import type {
   LivePlayer,
   LiveScore,
   Match,
+  MatchStatus,
   MatchTeam,
   TtmcAnswer,
   TtmcGame,
@@ -102,8 +103,14 @@ export const cleanTeam = (team: Draft['teams'][Side]) => ({
 })
 export const isActive = (account: Account) => account.status.toLowerCase() === 'active'
 export const errorMessage = (error: unknown, fallback: string) => error instanceof Error ? error.message : fallback
-export const isResumableMatch = (match: Match) => !match.finishedAt && ['joining', 'waiting', 'playing', 'revealed'].includes(match.status.toLowerCase())
-export const isCancellableMatch = (match: Match) => isResumableMatch(match) && match.status.toLowerCase() !== 'joining'
+const resumableStatuses: MatchStatus[] = ['joining', 'waiting', 'playing', 'revealed']
+const liveStatuses: MatchStatus[] = ['waiting', 'playing', 'revealed']
+const terminalStatuses: MatchStatus[] = ['finished', 'cancelled']
+export const isResumableStatus = (status: MatchStatus) => resumableStatuses.includes(status)
+export const isLiveStatus = (status: MatchStatus) => liveStatuses.includes(status)
+export const isTerminalStatus = (status: MatchStatus) => terminalStatuses.includes(status)
+export const isResumableMatch = (match: Match) => !match.finishedAt && isResumableStatus(match.status)
+export const isCancellableMatch = (match: Match) => isResumableMatch(match) && match.status !== 'joining'
 export function lowestBalanceSide(accountIds: Record<Side, string>, accounts: Account[], fallback: Side): Side {
   const a = accounts.find((account) => account.id === accountIds.a)
   const b = accounts.find((account) => account.id === accountIds.b)
@@ -116,7 +123,10 @@ export const activeTtmcSide = (game: TtmcGame): Side | null => game.state === 'r
   : null
 export const isGameId = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
 export const isRound = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
-const isNullableNumber = (value: unknown): value is number | null => value === null || typeof value === 'number'
+const statuses: MatchStatus[] = ['creating', 'joining', 'waiting', 'playing', 'revealed', 'finished', 'error', 'cancelled']
+const isMatchStatus = (value: unknown): value is MatchStatus => statuses.includes(value as MatchStatus)
+const isNullableNumber = (value: unknown): value is number | null => value === null || (typeof value === 'number' && Number.isFinite(value))
+const isCurrentRound = (value: unknown): value is number | null => value === null || (Number.isSafeInteger(value) && (value as number) >= -1)
 const isMatchTeam = (value: unknown): value is MatchTeam => isRecord(value) && typeof value.name === 'string' &&
   typeof value.accountId === 'string' && Array.isArray(value.roster) && value.roster.every((item) => typeof item === 'string')
 const isLivePlayer = (value: unknown): value is LivePlayer => isRecord(value) && isNullableNumber(value.id) &&
@@ -124,7 +134,7 @@ const isLivePlayer = (value: unknown): value is LivePlayer => isRecord(value) &&
 const isLiveScore = (value: unknown): value is LiveScore => isRecord(value) && isNullableNumber(value.id) &&
   typeof value.isReady === 'boolean' && isNullableNumber(value.answer) && isNullableNumber(value.delta) && typeof value.submitted === 'boolean'
 const isLiveGame = (value: unknown): value is LiveGame => isRecord(value) && isGameId(value.id) &&
-  (value.state === null || typeof value.state === 'string') && isNullableNumber(value.currentRound) &&
+  (value.state === null || typeof value.state === 'string') && isCurrentRound(value.currentRound) &&
   isNullableNumber(value.questionDurationSeconds) && isNullableNumber(value.questionDeadlineAt) &&
   (value.category === null || typeof value.category === 'string') && (value.question === null || typeof value.question === 'string') &&
   typeof value.showAnswer === 'boolean' && isNullableNumber(value.answer) && Array.isArray(value.scores) && value.scores.every(isLiveScore)
@@ -148,12 +158,12 @@ function isTtmcTeam(value: unknown, finished: boolean) {
     (finished || (value.success === null && value.points === null && value.officialAnswer === null))
 }
 const isTtmcGame = (value: unknown): value is TtmcGame => isRecord(value) && value.mode === 'ttmc' && isGameId(value.id) &&
-  isRound(value.roundNumber) && isRound(value.totalRounds) && (value.state === 'running' || value.state === 'finished') &&
+  isRound(value.roundNumber) && isRound(value.totalRounds) && (value.state === 'running' || value.state === 'finished' || value.state === 'unknown') &&
   (value.category === null || typeof value.category === 'string') && (value.title === null || typeof value.title === 'string') &&
   isRecord(value.teams) && isTtmcTeam(value.teams.a, value.state === 'finished') && isTtmcTeam(value.teams.b, value.state === 'finished')
 export const isLiveMatch = (value: unknown): value is LiveMatch => isRecord(value) && typeof value.id === 'string' &&
-  typeof value.status === 'string' && isRecord(value.party) && typeof value.party.state === 'string' &&
-  typeof value.party.playerCount === 'number' && Array.isArray(value.players) && value.players.every(isLivePlayer) &&
+  isMatchStatus(value.status) && (isLiveStatus(value.status) || isTerminalStatus(value.status)) && isRecord(value.party) && typeof value.party.state === 'string' &&
+  isRound(value.party.playerCount) && Array.isArray(value.players) && value.players.every(isLivePlayer) &&
   isRecord(value.teams) && isMatchTeam(value.teams.a) && isMatchTeam(value.teams.b) &&
   (value.gameMode === 'proximo' || value.gameMode === 'ttmc') &&
   (value.game === null || (value.gameMode === 'proximo' ? isLiveGame(value.game) : isTtmcGame(value.game))) &&

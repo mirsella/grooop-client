@@ -17,6 +17,7 @@ export type ObservedQuestion = {
 
 export type MatchTeam = { name: string; roster: string[]; accountId: string }
 export type GameMode = 'proximo' | 'ttmc'
+export type MatchStatus = 'creating' | 'joining' | 'waiting' | 'playing' | 'revealed' | 'finished' | 'error' | 'cancelled'
 export type TtmcContent = { slug: string; title: string }
 export type TtmcCatalog = {
   owned: boolean
@@ -25,7 +26,7 @@ export type TtmcCatalog = {
 }
 type MatchBase = {
   id: string
-  status: string
+  status: MatchStatus
   teamA: MatchTeam
   teamB: MatchTeam
   cost: number
@@ -78,7 +79,7 @@ export type TtmcQuestion =
   | { type: 'number'; prompt: string; min: number; max: number; step: number }
 export type TtmcAnswer = boolean | number | string | Array<string | number>
 export type TtmcTeam = { difficulty: number | null; submitted: boolean; success: boolean | null; points: number | null; question: TtmcQuestion | null; officialAnswer: null | string | string[] | { value: number; tolerance: number } }
-export type TtmcGame = { mode: 'ttmc'; id: number; roundNumber: number; totalRounds: number; state: string; category: string | null; title: string | null; teams: { a: TtmcTeam; b: TtmcTeam } }
+export type TtmcGame = { mode: 'ttmc'; id: number; roundNumber: number; totalRounds: number; state: 'running' | 'finished' | 'unknown'; category: string | null; title: string | null; teams: { a: TtmcTeam; b: TtmcTeam } }
 
 export type LivePlayer = {
   id: number | null
@@ -97,7 +98,7 @@ export type LiveScore = {
 
 type LiveMatchBase = {
   id: string
-  status: string
+  status: MatchStatus
   party: { state: string; playerCount: number }
   players: LivePlayer[]
   teams: { a: MatchTeam; b: MatchTeam }
