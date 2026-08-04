@@ -1492,7 +1492,7 @@ test('restores an unresolved Proximo draft after reconnecting', async ({ page })
 test('blocks quote and create until a delayed active-match restore completes', async ({ page }) => {
   const api = apiState(page)
   api.matches = [structuredClone(match)]
-  api.matchGetDelays = [600]
+  api.matchGetDelays = [2_000]
   await page.goto('/')
 
   await expect(page.getByText('Checking for an active match before opening the match desk…')).toBeVisible()
